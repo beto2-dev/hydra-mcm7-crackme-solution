@@ -147,7 +147,7 @@ watcher = ProcWatcher()
 watcher.start()
 
 print(f"[*] spawning under ConPTY: {BIN}")
-proc = PtyProcess.spawn(f'"{BIN}"')
+proc = PtyProcess.spawn(BIN)
 
 output = ""
 deadline = time.time() + 20
