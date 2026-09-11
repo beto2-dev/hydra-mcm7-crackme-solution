@@ -150,19 +150,33 @@ print(f"[*] spawning under ConPTY: {BIN}")
 proc = PtyProcess.spawn(BIN)
 
 output = ""
-deadline = time.time() + 20
 prompt_seen = False
+readbuf = []
+
+def _reader():
+    while proc.isalive():
+        try:
+            chunk = proc.read()
+            if chunk:
+                readbuf.append(chunk)
+        except Exception:
+            break
+
+reader_thread = threading.Thread(target=_reader, daemon=True)
+reader_thread.start()
+
+deadline = time.time() + 20
 while time.time() < deadline:
-    try:
-        chunk = proc.read(timeout=1.0)
-        if chunk:
-            output += chunk
-            print(chunk, end="", flush=True)
-    except Exception:
-        break
+    output = "".join(readbuf)
     if "Password" in output:
         prompt_seen = True
         break
+    if not proc.isalive():
+        break
+    time.sleep(0.3)
+    print(".", end="", flush=True)
+print()
+print(output, end="", flush=True)
 
 report["console_output_pre_input"] = output
 
@@ -190,25 +204,19 @@ if prompt_seen:
         proc.write(PWD_INPUT + "\r")
     except Exception as ex:
         print(f"[!] write failed: {ex}")
+    # wait for the verdict to appear in output
     deadline = time.time() + 30
     while time.time() < deadline:
-        try:
-            chunk = proc.read(timeout=1.0)
-            if chunk:
-                output += chunk
-                print(chunk, end="", flush=True)
-        except Exception:
-            break
+        output = "".join(readbuf)
         if proc.isalive() is False:
             break
-        # response after verdict → stop early
         if "DENIED" in output or "NICE" in output or "Flag" in output or "flag" in output:
-            time.sleep(1.0)
-            try:
-                output += proc.read(timeout=1.0) or ""
-            except Exception:
-                pass
             break
+        time.sleep(0.5)
+    # extra drain
+    time.sleep(2.0)
+    output = "".join(readbuf)
+    print(output, end="", flush=True)
 
 report["console_output_full"] = output
 
