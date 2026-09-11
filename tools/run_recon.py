@@ -49,10 +49,10 @@ class ProcWatcher(threading.Thread):
         super().__init__(daemon=True)
         self.events = []
         self.known = {p.pid for p in psutil.process_iter()}
-        self._stop = threading.Event()
+        self._halt = threading.Event()
 
     def run(self):
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             try:
                 for p in psutil.process_iter(attrs=["pid", "ppid", "name", "exe", "cmdline", "create_time"]):
                     if p.pid in self.known:
@@ -75,7 +75,7 @@ class ProcWatcher(threading.Thread):
             time.sleep(0.15)
 
     def stop(self):
-        self._stop.set()
+        self._halt.set()
         self.join(timeout=2)
 
 
@@ -100,7 +100,10 @@ def run_case(name, feed, timeout=45):
             out, err = proc.communicate()
             print(f"[!] TIMEOUT after {timeout}s (process kept running)")
     finally:
-        watcher.stop()
+        try:
+            watcher.stop()
+        except Exception as e:
+            print(f"[!] watcher stop issue: {e}")
     elapsed = round(time.time() - t0, 2)
     rec = {
         "name": name,
