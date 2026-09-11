@@ -1,0 +1,2 @@
+# password candidates for the verify workflow (one per line)
+AAAA

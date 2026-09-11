@@ -1,6 +1,6 @@
 # HYDRA (MCM 7) — Full Reverse Engineering Solution
 
-> Solved by **beto2-dev**
+> Solved-in-progress by **beto2-dev**
 
 Complete static + dynamic reverse engineering writeup and solution for
 **CrackNotMe's /\ Hydra \/ (MCM 7)** crackme hosted on
@@ -22,24 +22,44 @@ Challenge details:
 ```
 binaries/   Original crackme (password-protected zip from crackmes.one + extracted PE)
 tools/      Analysis tooling executed on native Windows via GitHub Actions
-solution/   Solver / keygen + full technical explanation
-evidence/   Runtime evidence captured in CI (reports, dumps, traces)
+            (pty_harness, run_recon, verify_password = the password oracle)
+solution/   WRITEUP.md (full technical deep-dive), emulator suite, analysis scripts
+evidence/   Reconstructed unpacked program, memory dumps, disassemblies,
+            CI reports
 ```
 
-## Work in progress
+## Progress
 
-This repository is a living writeup. The analysis pipeline:
+| Phase | Status |
+|---|---|
+| Recon (behavior on native Windows) | done |
+| Unpacking (original image reconstructed from runtime dumps) | done |
+| Static analysis (full pipeline disassembly) | done |
+| Dynamic analysis (memory dumps, identity-mapped emulation) | done |
+| Key-table builder + custom VM bit-exact emulation | done (validated) |
+| Deterministic seed recovery (`0x45523F21` on clean bare metal) | done |
+| Trap/decoy map (dead lengths 8/12/27/29, table sabotage) | done |
+| Ecall (parent↔child UD2) protocol | mapped, emulation pending |
+| Password recovery | in progress — see `solution/WRITEUP.md §12` |
+| CI verification oracle (`NICE!` = correct password) | ready (`verify.yml`) |
 
-1. **[Recon]** Run the target on native Windows (GitHub Actions runners) with
-   controlled inputs; capture stdout, exit codes, spawned (masqueraded) child
-   processes.
-2. **[Static]** Disassembly and decompilation of the (heavily obfuscated) image.
-3. **[Dynamic]** Runtime memory inspection and pipeline tracing.
-4. **[Solve]** Recover the original password and produce a keygen.
-5. **[Verify]** CI proves the solution: the binary itself prints its success
-   message when fed the recovered password.
+## Quick start
 
-See `solution/WRITEUP.md` for the full technical deep-dive.
+```bash
+# 1. reconstruct the original unpacked program from the memory dumps
+python3 solution/analysis/rebuild_image.py
+
+# 2. run the bit-exact emulators (needs: pip install unicorn capstone)
+python3 solution/emulator/vm_test.py        # VM(blob2, 0) -> 0x32CD000005A5
+python3 solution/emulator/emu_keytable.py   # key_table builder
+
+# 3. password oracle on a real Windows box (or the verify workflow)
+python tools/verify_password.py "<candidate>" binaries/CrackMe_packed.exe
+```
+
+The full technical story — packer, masquerade, parent-child debug protocol,
+anti-tamper, the custom VM, the crypto pipeline and the recovered seed — is in
+**[solution/WRITEUP.md](solution/WRITEUP.md)**.
 
 ## License / Credits
 

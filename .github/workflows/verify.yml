@@ -1,0 +1,66 @@
+name: Verify Password Candidates
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: 'Password candidate to test'
+        required: false
+        default: 'AAAA'
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Relax Defender for analysis sandbox
+        shell: powershell
+        run: |
+          try {
+            Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE" -ErrorAction Stop
+            Add-MpPreference -ExclusionProcess "CrackMe_packed.exe" -ErrorAction Stop
+            Write-Host "Defender exclusions added"
+          } catch { Write-Host "Defender: $_" }
+
+      - name: Read candidates
+        shell: pwsh
+        run: |
+          # candidates from the workflow input plus the file candidates.txt if present
+          $c = "${{ github.event.inputs.candidate }}"
+          if (-not $c) { $c = "AAAA" }
+          $all = @($c)
+          if (Test-Path candidates.txt) {
+            $all += (Get-Content candidates.txt | Where-Object { $_.Trim() -ne "" })
+          }
+          $all | Set-Content evidence_candidates.txt
+          Write-Host "Candidates: $($all -join ', ')"
+
+      - name: Run verification oracle
+        shell: pwsh
+        run: |
+          $results = @()
+          Get-Content evidence_candidates.txt | ForEach-Object {
+            $cand = $_.Trim()
+            Write-Host "=== Testing: $cand ==="
+            python tools/verify_password.py "$cand" binaries/CrackMe_packed.exe
+            $results += "candidate='$cand' exit=$LASTEXITCODE"
+          }
+          $results | Out-String | Write-Host
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-evidence
+          path: evidence/
+          if-no-files-found: warn
