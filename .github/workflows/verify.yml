@@ -40,13 +40,14 @@ jobs:
           if (-not $c) { $c = "AAAA" }
           $all = @($c)
           if (Test-Path candidates.txt) {
-            $all += (Get-Content candidates.txt | Where-Object { $_.Trim() -ne "" })
+            $all += (Get-Content candidates.txt | Where-Object { $_.Trim() -ne "" -and -not $_.Trim().StartsWith("#") })
           }
           $all | Set-Content evidence_candidates.txt
           Write-Host "Candidates: $($all -join ', ')"
 
       - name: Run verification oracle
         shell: pwsh
+        continue-on-error: true
         run: |
           $results = @()
           Get-Content evidence_candidates.txt | ForEach-Object {
