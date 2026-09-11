@@ -204,6 +204,20 @@ if prompt_seen:
         proc.write(PWD_INPUT + "\r")
     except Exception as ex:
         print(f"[!] write failed: {ex}")
+    # RACE DUMPS: capture mid-pipeline state (before anti-dump wipes)
+    import time as _t
+    for snap in range(10):
+        _t.sleep(0.03)
+        for e in watcher.masqueraded():
+            pid = e["pid"]
+            try:
+                regs = dump_process(pid, f"snap{snap}")
+                if regs:
+                    report["dumps"].append({"pid": pid, "phase": f"snap{snap}", "regions": len(regs)})
+            except Exception:
+                pass
+        if "DENIED" in "".join(readbuf) or "NICE" in "".join(readbuf):
+            break
     # wait for the verdict to appear in output
     deadline = time.time() + 30
     while time.time() < deadline:
