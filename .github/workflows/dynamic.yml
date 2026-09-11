@@ -1,0 +1,47 @@
+name: Dynamic Analysis
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  pty-run:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Relax Defender for analysis sandbox
+        shell: powershell
+        run: |
+          try {
+            Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE" -ErrorAction Stop
+            Add-MpPreference -ExclusionProcess "CrackMe_packed.exe" -ErrorAction Stop
+            Write-Host "Defender exclusions added"
+          } catch { Write-Host "Defender: $_" }
+
+      - name: Interactive ConPTY run with live memory dump
+        shell: pwsh
+        run: |
+          python tools/pty_harness.py binaries/CrackMe_packed.exe "AAAA" evidence/pty_report.json evidence/dumps
+
+      - name: Dump workspace info
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse evidence | Select-Object FullName, Length | Format-Table -AutoSize
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dynamic-evidence
+          path: evidence/
+          if-no-files-found: warn
