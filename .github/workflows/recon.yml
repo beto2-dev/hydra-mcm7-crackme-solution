@@ -1,0 +1,58 @@
+name: Behavior Recon
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  recon:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Relax Defender for analysis sandbox
+        shell: powershell
+        run: |
+          # Research sandbox: exclude the workspace from real-time scanning so the
+          # crackme (which uses process masquerading by design) is not quarantined.
+          try {
+            Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE" -ErrorAction Stop
+            Add-MpPreference -ExclusionProcess "CrackMe_packed.exe" -ErrorAction Stop
+            Write-Host "Defender exclusions added"
+          } catch {
+            Write-Host "Could not alter Defender (continuing anyway): $_"
+          }
+
+      - name: Record runner environment
+        shell: powershell
+        run: |
+          Get-CimInstance Win32_ComputerSystem | Select-Object Manufacturer, Model | Format-List
+          Get-CimInstance Win32_BIOS | Select-Object SMBIOSBIOSVersion, ReleaseDate | Format-List
+          [System.Environment]::OSVersion | Format-List
+          whoami
+
+      - name: Run behavior recon
+        shell: pwsh
+        run: |
+          python tools/run_recon.py binaries/CrackMe_packed.exe evidence/recon_report.json
+
+      - name: List leftover processes
+        if: always()
+        shell: pwsh
+        run: tasklist /v 2>&1 | Out-String -Width 220
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recon-evidence
+          path: evidence/
+          if-no-files-found: warn

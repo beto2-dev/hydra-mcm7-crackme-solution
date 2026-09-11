@@ -1,0 +1,4 @@
+evidence/*.json
+evidence/*.dmp
+__pycache__/
+*.pyc
