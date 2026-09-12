@@ -148,47 +148,6 @@ def threads_of(pid):
 
 report = {"binary": BIN, "console": "", "children": [], "values": {}}
 
-# ---------------------------------------------------------------- spawn
-print(f"[*] spawning under ConPTY: {BIN}")
-proc = PtyProcess.spawn(BIN)
-readbuf = []
-
-def _reader():
-    while proc.isalive():
-        try:
-            chunk = proc.read()
-            if chunk:
-                readbuf.append(chunk)
-        except Exception:
-            break
-threading.Thread(target=_reader, daemon=True).start()
-
-deadline = time.time() + 30
-prompt_seen = False
-while time.time() < deadline:
-    out = "".join(readbuf)
-    if "Password" in out:
-        prompt_seen = True
-        break
-    if not proc.isalive():
-        break
-    time.sleep(0.2)
-report["console"] = "".join(readbuf)
-print(report["console"][-200:], flush=True)
-if not prompt_seen:
-    print("[!] no prompt")
-    sys.exit(1)
-
-# ---------------------------------------------------------------- collect children (repeatedly)
-children = {}
-for _ in range(20):
-    for pid, info in masqueraded_pids().items():
-        if pid not in children:
-            children[pid] = info
-    time.sleep(0.25)
-print(f"[*] masqueraded children: {list(children.keys())}")
-report["children"] = [{k: v for k, v in i.items() if k != "create_time"} for i in children.values()]
-
 # signature: bytes of the original image at RVA 0x30738 (arg2 build, unique)
 sig = None
 imgp = os.path.join(os.path.dirname(BIN), "..", "evidence", "original_image.bin")
@@ -196,146 +155,228 @@ if os.path.exists(imgp):
     img = open(imgp, "rb").read()
     sig = img[0x30738:0x30778]
 
-# ---------------------------------------------------------------- per-child capture
-for pid, info in children.items():
-    tag = f"pid{pid}"
-    h = k32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
-    if not h:
-        print(f"[!] OpenProcess({pid}) failed")
-        continue
-    try:
-        cdat = {"pid": pid, "exe": info.get("exe")}
-
-        # PEB
-        pbi = PBI()
-        if ntdll.NtQueryInformationProcess(h, 0, ctypes.byref(pbi), ctypes.sizeof(pbi), None) == 0:
-            peb = pbi.PebBaseAddress
-            pe = rpm(h, peb, 0x400)
-            if pe:
-                cdat["BeingDebugged"] = pe[2]
-                cdat["NtGlobalFlag"] = hex(struct.unpack_from("<I", pe, 0xBC)[0])
-                cdat["peb_image_base"] = hex(struct.unpack_from("<Q", pe, 0x10)[0])
-
-        # full memory walk: find the unpacked original image via .text signature
-        image_base = None
-        addr = 0
-        mbi = MBI64()
-        regions = []
-        while addr < 0x7FFFFFFF0000:
-            if k32.VirtualQueryEx(h, ctypes.c_void_p(addr), ctypes.byref(mbi), ctypes.sizeof(mbi)) == 0:
-                break
-            if mbi.State == 0x1000 and mbi.Protect not in (0x01,) and not (mbi.Protect & 0x100):
-                regions.append((mbi.BaseAddress, mbi.RegionSize, mbi.Protect))
-            addr = mbi.BaseAddress + mbi.RegionSize
-        cdat["regions"] = len(regions)
-        for base, size, prot in regions:
-            if size < 0x61000:
-                continue
-            # test: does this region start at an image RVA-0 boundary? read at +0x30738
-            d = rpm(h, base + 0x30738, 0x40)
-            if d and sig and d == sig:
-                image_base = base
-                break
-            # also search anywhere inside big regions
-            if size >= 0x100000 and sig:
-                d = rpm(h, base, min(size, 0x3000000))
-                if d:
-                    i = d.find(sig)
-                    if i >= 0:
-                        image_base = base + i - 0x30738
+# ---------------------------------------------------------------- capture fn
+def capture_phase(phase, children_map):
+    """Capture PEB/stacks/globals of every masqueraded child. Returns per-pid data."""
+    out = {}
+    for pid, info in children_map.items():
+        tag = f"pid{pid}_{phase}"
+        h = k32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
+        if not h:
+            continue
+        try:
+            cdat = {"pid": pid, "exe": info.get("exe")}
+            pbi = PBI()
+            if ntdll.NtQueryInformationProcess(h, 0, ctypes.byref(pbi), ctypes.sizeof(pbi), None) == 0:
+                pe = rpm(h, pbi.PebBaseAddress, 0x400)
+                if pe:
+                    cdat["BeingDebugged"] = pe[2]
+                    cdat["NtGlobalFlag"] = hex(struct.unpack_from("<I", pe, 0xBC)[0])
+                    cdat["peb_image_base"] = hex(struct.unpack_from("<Q", pe, 0x10)[0])
+            image_base = cdat.get("_image_base")  # reuse if known
+            if not image_base:
+                addr = 0
+                mbi = MBI64()
+                regions = []
+                while addr < 0x7FFFFFFF0000:
+                    if k32.VirtualQueryEx(h, ctypes.c_void_p(addr), ctypes.byref(mbi), ctypes.sizeof(mbi)) == 0:
                         break
-        cdat["image_base"] = hex(image_base) if image_base else None
-        print(f"[*] child {pid}: image_base={cdat['image_base']} regions={cdat['regions']} BD={cdat.get('BeingDebugged')}")
+                    if mbi.State == 0x1000 and mbi.Protect not in (0x01,) and not (mbi.Protect & 0x100):
+                        regions.append((mbi.BaseAddress, mbi.RegionSize))
+                    addr = mbi.BaseAddress + mbi.RegionSize
+                cdat["regions"] = len(regions)
+                image_base = None
+                for base, size in regions:
+                    if size < 0x61000:
+                        continue
+                    d = rpm(h, base + 0x30738, 0x40)
+                    if d and sig and d == sig:
+                        image_base = base
+                        break
+                    if size >= 0x100000 and sig:
+                        d = rpm(h, base, min(size, 0x3000000))
+                        if d:
+                            i = d.find(sig)
+                            if i >= 0:
+                                image_base = base + i - 0x30738
+                                break
+                cdat["image_base"] = hex(image_base) if image_base else None
+                cdat["_image_base"] = image_base
+            if image_base:
+                g = rpm(h, image_base + 0x63DC0, 0x100)
+                if g:
+                    vals = {}
+                    names = ["g63DC0", "blob1_ptr", "blob1_end", "g63DD8", "blob2_ptr", "blob2_end",
+                             "g63DF0", "g63DF8", "g63E00", "g63E08", "g63E10", "g63E18",
+                             "g63E20", "g63E28", "g63E30", "g63E38", "g63E40", "g63E48", "g63E50"]
+                    for i, name in enumerate(names):
+                        vals[name] = hex(struct.unpack_from("<Q", g, i * 8)[0])
+                    v = rpm(h, image_base + 0x625B4, 4)
+                    if v:
+                        vals["g625B4"] = hex(struct.unpack("<I", v)[0])
+                    cdat["globals"] = vals
+                    # dump blobs
+                    for key, name in [("blob1_ptr", "blob1"), ("blob2_ptr", "blob2")]:
+                        try:
+                            p = int(vals[key], 16)
+                            e = int(vals.get(key.replace("_ptr", "_end"), "0"), 16)
+                            if e > p and e - p <= 0x10000:
+                                d = rpm(h, p, e - p)
+                                if d:
+                                    fn = os.path.join(DUMPDIR, f"{tag}_{name}.bin")
+                                    open(fn, "wb").write(d)
+                                    cdat[name + "_size"] = e - p
+                        except Exception:
+                            pass
+                    # write-watch page
+                    try:
+                        wwp = int(vals["g63E08"], 16)
+                        if wwp:
+                            d = rpm(h, wwp, 0x1000)
+                            if d:
+                                fn = os.path.join(DUMPDIR, f"{tag}_wwpage.bin")
+                                open(fn, "wb").write(d)
+                    except Exception:
+                        pass
+                    for rva, name, size in [(0x61CA0, "T64", 0x100), (0x61DA0, "const2048", 0x800)]:
+                        d = rpm(h, image_base + rva, size)
+                        if d:
+                            fn = os.path.join(DUMPDIR, f"{tag}_{name}.bin")
+                            open(fn, "wb").write(d)
+                            if size == 0x800:
+                                import zlib
+                                cdat["const_crc"] = hex(zlib.crc32(d))
+            # thread stacks
+            stack_hits = []
+            for tid in threads_of(pid):
+                th = k32.OpenThread(THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION | THREAD_SUSPEND_RESUME, False, tid)
+                if not th:
+                    continue
+                ctx = CTX64()
+                ctx.ContextFlags = 0x10003F
+                k32.SuspendThread(th)
+                ok = k32.GetThreadContext(th, ctypes.byref(ctx))
+                k32.ResumeThread(th)
+                k32.CloseHandle(th)
+                if not ok:
+                    continue
+                rsp = ctx.Rsp
+                if not (0x10000 < rsp < 0x7FFFFFFFFFFF):
+                    continue
+                stack = rpm(h, (rsp - 0x100) & ~0xF, 0x20000)
+                if not stack:
+                    continue
+                sbase = (rsp - 0x100) & ~0xF
+                fn = os.path.join(DUMPDIR, f"{tag}_stack_tid{tid}.bin")
+                open(fn, "wb").write(stack)
+                pos = 0
+                while True:
+                    i = stack.find(b":\\Users\\", pos)
+                    if i < 0:
+                        break
+                    j = i - 1  # ':' is at i, drive letter at i-1
+                    if j >= 0 and stack[j:j + 2] in (b"C:", b"c:"):
+                        str_addr = sbase + j
+                        rbp_c = str_addr - 0x690
+                        off = rbp_c - sbase
+                        if 0 <= off and off + 0x800 < len(stack):
+                            def q(o):
+                                return struct.unpack_from("<Q", stack, o)[0]
+                            hit = {"tid": tid, "rbp_main": hex(rbp_c),
+                                   "arg5": hex(q(off + 0x78) & 0xFFFFFFFF),
+                                   "arg5_full": hex(q(off + 0x78)),
+                                   "rbpB0": hex(q(off + 0xB0)),
+                                   "rbpA8": hex(q(off + 0xA8)),
+                                   "rbp80": hex(q(off + 0x80)),
+                                   "arg2_rbp7F8": hex(q(off + 0x7F8) & 0xFFFFFFFF),
+                                   "dr2": hex(ctx.Dr2), "dr3": hex(ctx.Dr3),
+                                   "path": stack[j:j + 120].split(b"\x00")[0].decode(errors="replace")}
+                            stack_hits.append(hit)
+                    pos = i + 1
+            cdat["stack_hits"] = stack_hits
+            out[str(pid)] = cdat
+            print(f"[*] [{phase}] child {pid}: ib={cdat.get('image_base')} BD={cdat.get('BeingDebugged')} hits={len(stack_hits)}")
+            for hit in stack_hits:
+                print(f"    {hit}")
+        finally:
+            k32.CloseHandle(h)
+    return out
 
-        if image_base:
-            # globals + constants from the REAL image
-            g = rpm(h, image_base + 0x63DC0, 0xA0)
-            if g:
-                vals = {}
-                names = ["g63DC0", "blob1_ptr", "blob1_end", "blob2_ptr", "blob2_end", "g63E00",
-                         "g63E08", "g63E10", "g63E14", "g63E18", "g63E20", "g63E28", "g63E30",
-                         "g63E38", "g63E40", "g63E48", "g63E50"]
-                for i, name in enumerate(names):
-                    vals[name] = hex(struct.unpack_from("<Q", g, i * 8)[0])
-                v = rpm(h, image_base + 0x625B4, 4)
-                if v:
-                    vals["g625B4"] = hex(struct.unpack("<I", v)[0])
-                cdat["globals"] = vals
-                for rva, name, size in [(0x61CA0, "T64", 0x100), (0x61DA0, "const2048", 0x800)]:
-                    d = rpm(h, image_base + rva, size)
-                    if d:
-                        fn = os.path.join(DUMPDIR, f"{tag}_{name}.bin")
-                        open(fn, "wb").write(d)
-                        cdat[name] = fn
-                        import zlib
-                        cdat[name + "_crc"] = hex(zlib.crc32(d)) if size == 0x800 else None
-                # the child marker
-                hdr = rpm(h, image_base + 0x28, 8)
-                if hdr:
-                    a, b = struct.unpack("<II", hdr)
-                    cdat["child_marker_ok"] = (a ^ 0x31415926) == b
 
-        # thread stacks
-        stack_hits = []
-        for tid in threads_of(pid):
-            th = k32.OpenThread(THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION | THREAD_SUSPEND_RESUME, False, tid)
-            if not th:
-                continue
-            ctx = CTX64()
-            ctx.ContextFlags = 0x10003F  # CONTEXT_ALL-ish
-            k32.SuspendThread(th)
-            ok = k32.GetThreadContext(th, ctypes.byref(ctx))
-            k32.ResumeThread(th)
-            k32.CloseHandle(th)
-            if not ok:
-                continue
-            rsp = ctx.Rsp
-            if not (0x10000 < rsp < 0x7FFFFFFFFFFF):
-                continue
-            stack = rpm(h, (rsp - 0x100) & ~0xF, 0x20000)
-            if not stack:
-                continue
-            sbase = (rsp - 0x100) & ~0xF
-            fn = os.path.join(DUMPDIR, f"{tag}_stack_tid{tid}.bin")
-            open(fn, "wb").write(stack)
-            print(f"[*]   thread {tid}: rsp={hex(rsp)} rip={hex(ctx.Rip)} dr2={hex(ctx.Dr2)} dr3={hex(ctx.Dr3)} stack saved ({len(stack)} bytes from {hex(sbase)})")
-            # find main rbp: ASCII path 'C:\' followed later by '.exe' near [rbp+0x690]
-            pos = 0
-            while True:
-                i = stack.find(b":\\Users\\", pos)
-                if i < 0:
-                    break
-                # walk back to the drive letter
-                j = i - 2
-                if j >= 0 and stack[j:j + 2] in (b"C:", b"c:"):
-                    str_addr = sbase + j
-                    rbp_c = str_addr - 0x690
-                    off = rbp_c - sbase
-                    if 0 <= off and off + 0x800 < len(stack):
-                        arg5 = struct.unpack_from("<Q", stack, off + 0x78)[0]
-                        b0 = struct.unpack_from("<Q", stack, off + 0xB0)[0]
-                        a8 = struct.unpack_from("<Q", stack, off + 0xA8)[0]
-                        v80 = struct.unpack_from("<Q", stack, off + 0x80)[0]
-                        stack_hits.append({"tid": tid, "rbp_main": hex(rbp_c), "arg5": hex(arg5),
-                                           "rbpB0": hex(b0), "rbpA8": hex(a8), "rbp80": hex(v80),
-                                           "path": stack[j:j + 120].split(b"\x00")[0].decode(errors="replace")})
-                pos = i + 1
-        cdat["stack_hits"] = stack_hits
-        report["values"][str(pid)] = cdat
-    finally:
-        k32.CloseHandle(h)
+def run_once(instance):
+    """One full spawn->prompt->(optional input)->post capture. Returns report data."""
+    r = {"console": "", "prompt": {}, "post": {}}
+    proc = PtyProcess.spawn(BIN)
+    readbuf = []
 
-# ---------------------------------------------------------------- cleanup
-for pid in children:
+    def _reader():
+        while proc.isalive():
+            try:
+                chunk = proc.read()
+                if chunk:
+                    readbuf.append(chunk)
+            except Exception:
+                break
+    threading.Thread(target=_reader, daemon=True).start()
+
+    deadline = time.time() + 30
+    prompt_seen = False
+    while time.time() < deadline:
+        out = "".join(readbuf)
+        if "Password" in out:
+            prompt_seen = True
+            break
+        if not proc.isalive():
+            break
+        time.sleep(0.2)
+    r["console"] = "".join(readbuf)
+    print(r["console"][-150:], flush=True)
+    if not prompt_seen:
+        return r
+
+    children = {}
+    for _ in range(16):
+        for pid, info in masqueraded_pids().items():
+            if pid not in children:
+                children[pid] = info
+        time.sleep(0.25)
+    r["prompt_children"] = [i.get("exe") for i in children.values()]
+    r["prompt"] = capture_phase(f"i{instance}_prompt", children)
+
+    # send a test password and capture post-verdict state (arg2 now in [rbp+0x7F8])
     try:
-        psutil.Process(pid).kill()
+        proc.write("CaptureProbe99\r")
     except Exception:
         pass
-try:
-    if proc.isalive():
-        proc.terminate(force=True)
-except Exception:
-    pass
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        out = "".join(readbuf)
+        if "DENIED" in out or "NICE" in out or not proc.isalive():
+            break
+        time.sleep(0.2)
+    time.sleep(1.0)
+    r["console_full"] = "".join(readbuf)
+    # refresh child map (same pids)
+    children2 = {p: children[p] for p in children if psutil.pid_exists(p)}
+    r["post"] = capture_phase(f"i{instance}_post", children2)
+
+    for pid in children:
+        try:
+            psutil.Process(pid).kill()
+        except Exception:
+            pass
+    try:
+        if proc.isalive():
+            proc.terminate(force=True)
+    except Exception:
+        pass
+    return r
+
+
+report["instances"] = []
+for inst in range(2):
+    print(f"\n===== INSTANCE {inst} =====")
+    report["instances"].append(run_once(inst))
 
 with open(OUT, "w", encoding="utf-8") as f:
     json.dump(report, f, indent=2)
