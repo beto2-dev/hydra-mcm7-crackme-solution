@@ -10,6 +10,7 @@
  */
 #include "hydra_core.h"
 #include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -21,6 +22,34 @@ uint32_t check_password(const uint8_t *pwd, size_t len, check_result_t *out);
 
 int main(int argc, char **argv) {
     const char *probes = argc > 1 ? argv[1] : "../emulator/probes";
+
+    /* wordlist mode: argv[2] == "-w" <file> */
+    if (argc > 3 && !strcmp(argv[2], "-w")) {
+        if (!hydra_load_tables(probes)) { fprintf(stderr, "[!] tables\n"); return 1; }
+        FILE *f = fopen(argv[3], "r");
+        if (!f) { perror("wordlist"); return 1; }
+        char line[256];
+        check_result_t res;
+        uint64_t n = 0;
+        while (fgets(line, sizeof line, f)) {
+            size_t ln = strlen(line);
+            while (ln && (line[ln-1] == '\n' || line[ln-1] == '\r')) line[--ln] = 0;
+            if (!ln) continue;
+            uint32_t v = check_password((const uint8_t *)line, ln, &res);
+            n++;
+            if (v == FNV_TARGET) {
+                printf("[+] FOUND: %s\n    r11=%08x check_buf: %.*s\n",
+                       line, res.r11, 64, res.check_buf);
+                FILE *g = fopen("found_password.txt", "a");
+                fprintf(g, "%s r11=%08x\n", line, res.r11);
+                fclose(g);
+            }
+        }
+        fclose(f);
+        fprintf(stderr, "[*] %llu candidates tested\n", (unsigned long long)n);
+        return 0;
+    }
+
     uint64_t start = argc > 2 ? strtoull(argv[2], NULL, 16) : 0;
     uint64_t end   = argc > 3 ? strtoull(argv[3], NULL, 16) : 0x100000000ull;
 
