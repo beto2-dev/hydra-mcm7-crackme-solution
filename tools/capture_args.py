@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-HYDRA (MCM 7) — exact check() argument capture.
+HYDRA (MCM 7) — exact check() argument capture, v2.
 
-At the password prompt (before any input), main's frame already holds:
-  [rbp+0x78]  = arg5 (FNV1a-0 of an API's code bytes on this machine)
-  [rbp+0xB0]  = ecall mix used for arg3
-  [rbp+0x690] = the masqueraded module path (marker to locate rbp)
-The PEB still holds BeingDebugged (decides arg2 between 0x45523F21 / 0xFFFFFFFF).
-
-This tool spawns the crackme under ConPTY, waits for the prompt, locates the
-masqueraded child, reads its PEB + every thread stack, extracts the values and
-writes a JSON report + raw dumps for offline analysis.
+The masquerade may spawn several AppData\...\CLR processes (incl. decoys).
+This version:
+  1. spawns under ConPTY, waits for the prompt
+  2. enumerates ALL masqueraded processes (repeatedly, catching late spawns)
+  3. for each: full region dump (to find the unpacked original image via a
+     .text signature), PEB, all thread stacks
+  4. locates main's rbp in the stack via the module path at [rbp+0x690]
+  5. extracts arg5=[rbp+0x78], ecall mix [rbp+0xB0], tamper [rbp+0xA8/0x80]
 """
 import json
 import os
@@ -40,47 +39,37 @@ ntdll = ctypes.windll.ntdll
 
 PROCESS_VM_READ = 0x0010
 PROCESS_QUERY_INFORMATION = 0x0400
-PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-THREAD_QUERY_INFORMATION = 0x0040
 THREAD_GET_CONTEXT = 0x0008
+THREAD_QUERY_INFORMATION = 0x0040
 THREAD_SUSPEND_RESUME = 0x0002
 
-# ---------------------------------------------------------------- structures
-class MEMORY_BASIC_INFORMATION64(ctypes.Structure):
-    _fields_ = [("BaseAddress", ctypes.c_ulonglong),
-                ("AllocationBase", ctypes.c_ulonglong),
-                ("AllocationProtect", ctypes.c_ulong),
-                ("__alignment1", ctypes.c_ulong),
-                ("RegionSize", ctypes.c_ulonglong),
-                ("State", ctypes.c_ulong),
-                ("Protect", ctypes.c_ulong),
-                ("Type", ctypes.c_ulong),
-                ("__alignment2", ctypes.c_ulong)]
+TEXT_SIG = None  # set later from the reconstructed image (for identifying the real child)
 
-class PROCESS_BASIC_INFORMATION(ctypes.Structure):
-    _fields_ = [("Reserved1", ctypes.c_void_p),
-                ("PebBaseAddress", ctypes.c_void_p),
-                ("Reserved2", ctypes.c_void_p * 2),
-                ("UniqueProcessId", ctypes.c_void_p),
+
+class MBI64(ctypes.Structure):
+    _fields_ = [("BaseAddress", ctypes.c_ulonglong), ("AllocationBase", ctypes.c_ulonglong),
+                ("AllocationProtect", ctypes.c_ulong), ("__a1", ctypes.c_ulong),
+                ("RegionSize", ctypes.c_ulonglong), ("State", ctypes.c_ulong),
+                ("Protect", ctypes.c_ulong), ("Type", ctypes.c_ulong), ("__a2", ctypes.c_ulong)]
+
+class PBI(ctypes.Structure):
+    _fields_ = [("Reserved1", ctypes.c_void_p), ("PebBaseAddress", ctypes.c_void_p),
+                ("Reserved2", ctypes.c_void_p * 2), ("UniqueProcessId", ctypes.c_void_p),
                 ("Reserved3", ctypes.c_void_p)]
 
-class THREADENTRY32(ctypes.Structure):
-    _fields_ = [("dwSize", wintypes.DWORD),
-                ("cntUsage", wintypes.DWORD),
-                ("th32ThreadID", wintypes.DWORD),
-                ("th32OwnerProcessID", wintypes.DWORD),
-                ("tpBasePri", ctypes.c_long),
-                ("tpDeltaPri", ctypes.c_long),
-                ("dwFlags", wintypes.DWORD)]
+class TE32(ctypes.Structure):
+    _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                ("th32ThreadID", wintypes.DWORD), ("th32OwnerProcessID", wintypes.DWORD),
+                ("tpBasePri", ctypes.c_long), ("tpDeltaPri", ctypes.c_long), ("dwFlags", wintypes.DWORD)]
 
-class FLOATING_SAVE_AREA(ctypes.Structure):
+class FSA(ctypes.Structure):
     _fields_ = [("ControlWord", wintypes.DWORD), ("StatusWord", wintypes.DWORD),
                 ("TagWord", wintypes.DWORD), ("ErrorOffset", wintypes.DWORD),
                 ("ErrorSelector", wintypes.DWORD), ("DataOffset", wintypes.DWORD),
                 ("DataSelector", wintypes.DWORD), ("RegisterArea", ctypes.c_ubyte * 80),
                 ("Cr0NpxState", wintypes.DWORD)]
 
-class CONTEXT64(ctypes.Structure):
+class CTX64(ctypes.Structure):
     _pack_ = 16
     _fields_ = [("P1Home", ctypes.c_ulonglong), ("P2Home", ctypes.c_ulonglong),
                 ("P3Home", ctypes.c_ulonglong), ("P4Home", ctypes.c_ulonglong),
@@ -101,27 +90,22 @@ class CONTEXT64(ctypes.Structure):
                 ("R10", ctypes.c_ulonglong), ("R11", ctypes.c_ulonglong),
                 ("R12", ctypes.c_ulonglong), ("R13", ctypes.c_ulonglong),
                 ("R14", ctypes.c_ulonglong), ("R15", ctypes.c_ulonglong),
-                ("Rip", ctypes.c_ulonglong),
-                ("FltSave", FLOATING_SAVE_AREA),
-                ("VectorRegister", ctypes.c_ubyte * 16 * 26),
-                ("VectorControl", ctypes.c_ulonglong),
-                ("DebugControl", ctypes.c_ulonglong),
-                ("LastBranchToRip", ctypes.c_ulonglong),
-                ("LastBranchFromRip", ctypes.c_ulonglong),
-                ("LastExceptionToRip", ctypes.c_ulonglong),
+                ("Rip", ctypes.c_ulonglong), ("FltSave", FSA),
+                ("VectorRegister", ctypes.c_ubyte * 16 * 26), ("VectorControl", ctypes.c_ulonglong),
+                ("DebugControl", ctypes.c_ulonglong), ("LastBranchToRip", ctypes.c_ulonglong),
+                ("LastBranchFromRip", ctypes.c_ulonglong), ("LastExceptionToRip", ctypes.c_ulonglong),
                 ("LastExceptionFromRip", ctypes.c_ulonglong)]
 
 k32.OpenProcess.restype = wintypes.HANDLE
 k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 k32.ReadProcessMemory.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
-k32.VirtualQueryEx.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.POINTER(MEMORY_BASIC_INFORMATION64), ctypes.c_size_t]
+k32.VirtualQueryEx.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.POINTER(MBI64), ctypes.c_size_t]
 k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
 k32.OpenThread.restype = wintypes.HANDLE
 k32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-k32.GetThreadContext.argtypes = [wintypes.HANDLE, ctypes.POINTER(CONTEXT64)]
+k32.GetThreadContext.argtypes = [wintypes.HANDLE, ctypes.POINTER(CTX64)]
 k32.SuspendThread.argtypes = [wintypes.HANDLE]
 k32.ResumeThread.argtypes = [wintypes.HANDLE]
-TH32CS_THREAD = 0x00000004
 
 
 def rpm(h, addr, size):
@@ -132,30 +116,25 @@ def rpm(h, addr, size):
     return None
 
 
-def dump_region(h, base, size, name):
-    data = rpm(h, base, size)
-    if data is None:
-        return None
-    fn = os.path.join(DUMPDIR, name)
-    with open(fn, "wb") as f:
-        f.write(data)
-    return fn
-
-
-def get_peb(h):
-    pbi = PROCESS_BASIC_INFORMATION()
-    r = ntdll.NtQueryInformationProcess(h, 0, ctypes.byref(pbi), ctypes.sizeof(pbi), None)
-    if r:
-        return None
-    return pbi.PebBaseAddress
+def masqueraded_pids():
+    out = {}
+    for p in psutil.process_iter(attrs=["pid", "ppid", "name", "exe", "cmdline", "create_time"]):
+        try:
+            i = p.info
+            exe = i.get("exe") or ""
+            if "Microsoft\\CLR" in exe:
+                out[i["pid"]] = i
+        except Exception:
+            pass
+    return out
 
 
 def threads_of(pid):
-    snap = k32.CreateToolhelp32Snapshot(TH32CS_THREAD, 0)
-    if snap == wintypes.HANDLE(-1) or not snap:
+    snap = k32.CreateToolhelp32Snapshot(4, 0)  # TH32CS_THREAD
+    if not snap or snap == wintypes.HANDLE(-1):
         return []
-    te = THREADENTRY32()
-    te.dwSize = ctypes.sizeof(THREADENTRY32)
+    te = TE32()
+    te.dwSize = ctypes.sizeof(TE32)
     out = []
     if k32.Thread32First(snap, ctypes.byref(te)):
         while True:
@@ -167,56 +146,13 @@ def threads_of(pid):
     return out
 
 
-# ---------------------------------------------------------------- proc watcher
-class ProcWatcher(threading.Thread):
-    def __init__(self):
-        super().__init__(daemon=True)
-        self.events = []
-        self.known = {p.pid for p in psutil.process_iter()}
-        self._halt = threading.Event()
+report = {"binary": BIN, "console": "", "children": [], "values": {}}
 
-    def run(self):
-        while not self._halt.is_set():
-            try:
-                for p in psutil.process_iter(attrs=["pid", "ppid", "name", "exe", "cmdline"]):
-                    if p.pid in self.known:
-                        continue
-                    self.known.add(p.pid)
-                    try:
-                        i = p.info
-                        self.events.append({k: i[k] for k in ("pid", "ppid", "name", "exe", "cmdline")})
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            time.sleep(0.05)
-
-    def stop(self):
-        self._halt.set()
-        try:
-            self.join(timeout=2)
-        except Exception:
-            pass
-
-    def masqueraded(self):
-        out = []
-        for e in self.events:
-            exe = e.get("exe") or ""
-            if "Microsoft\\CLR" in exe or ("AppData" in exe and e["pid"] != os.getpid()):
-                out.append(e)
-        return out
-
-
-# ---------------------------------------------------------------- main
-report = {"binary": BIN, "console": "", "child": None, "values": {}, "dumps": []}
-
-watcher = ProcWatcher()
-watcher.start()
-
+# ---------------------------------------------------------------- spawn
 print(f"[*] spawning under ConPTY: {BIN}")
 proc = PtyProcess.spawn(BIN)
-
 readbuf = []
+
 def _reader():
     while proc.isalive():
         try:
@@ -237,171 +173,164 @@ while time.time() < deadline:
     if not proc.isalive():
         break
     time.sleep(0.2)
-print("".join(readbuf), end="", flush=True)
 report["console"] = "".join(readbuf)
-
+print(report["console"][-200:], flush=True)
 if not prompt_seen:
-    print("[!] no prompt seen; aborting")
-    watcher.stop()
+    print("[!] no prompt")
     sys.exit(1)
 
-time.sleep(1.0)  # let the child settle (background thread + ecalls done)
-children = watcher.masqueraded()
-if not children:
-    print("[!] no masqueraded child found")
-    watcher.stop()
-    sys.exit(1)
+# ---------------------------------------------------------------- collect children (repeatedly)
+children = {}
+for _ in range(20):
+    for pid, info in masqueraded_pids().items():
+        if pid not in children:
+            children[pid] = info
+    time.sleep(0.25)
+print(f"[*] masqueraded children: {list(children.keys())}")
+report["children"] = [{k: v for k, v in i.items() if k != "create_time"} for i in children.values()]
 
-child = children[0]
-report["child"] = child
-cpid = child["pid"]
-print(f"[*] child: pid={cpid} exe={child.get('exe')}")
+# signature: bytes of the original image at RVA 0x30738 (arg2 build, unique)
+sig = None
+imgp = os.path.join(os.path.dirname(BIN), "..", "evidence", "original_image.bin")
+if os.path.exists(imgp):
+    img = open(imgp, "rb").read()
+    sig = img[0x30738:0x30778]
 
-h = k32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, cpid)
-if not h:
-    print(f"[!] OpenProcess failed {ctypes.GetLastError()}")
-    sys.exit(1)
+# ---------------------------------------------------------------- per-child capture
+for pid, info in children.items():
+    tag = f"pid{pid}"
+    h = k32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
+    if not h:
+        print(f"[!] OpenProcess({pid}) failed")
+        continue
+    try:
+        cdat = {"pid": pid, "exe": info.get("exe")}
 
-# --- PEB
-peb = get_peb(h)
-report["values"]["peb"] = hex(peb) if peb else None
-if peb:
-    pebdata = rpm(h, peb, 0x400)
-    if pebdata:
-        being_debugged = pebdata[2]
-        ntglobal = struct.unpack_from("<I", pebdata, 0xBC)[0]
-        image_base = struct.unpack_from("<Q", pebdata, 0x10)[0]
-        report["values"]["BeingDebugged"] = being_debugged
-        report["values"]["NtGlobalFlag"] = hex(ntglobal)
-        report["values"]["child_image_base"] = hex(image_base)
-        # Ldr walk to list modules (kernel32 base etc.)
-        ldr = struct.unpack_from("<Q", pebdata, 0x18)[0]
-        ldrdata = rpm(h, ldr, 0x60)
-        if ldrdata:
-            head = struct.unpack_from("<Q", ldrdata, 0x20)[0]  # InMemoryOrderModuleList
-            cur = head
-            modules = []
-            for _ in range(30):
-                entry = rpm(h, cur, 0x60)  # InMemoryOrderLinks-based entry
-                if not entry:
-                    break
-                flink = struct.unpack_from("<Q", entry, 0)[0]
-                dllbase = struct.unpack_from("<Q", entry, 0x20)[0]
-                namebuf_ptr = struct.unpack_from("<Q", entry, 0x50)[0]
-                name_len = struct.unpack_from("<H", entry, 0x48)[0]
-                name = ""
-                if namebuf_ptr and name_len:
-                    nb = rpm(h, namebuf_ptr, name_len)
-                    if nb:
-                        try:
-                            name = nb.decode("utf-16-le", errors="replace")
-                        except Exception:
-                            pass
-                modules.append({"base": hex(dllbase), "name": name})
-                cur = flink
-                if cur == head:
-                    break
-            report["values"]["modules"] = modules
+        # PEB
+        pbi = PBI()
+        if ntdll.NtQueryInformationProcess(h, 0, ctypes.byref(pbi), ctypes.sizeof(pbi), None) == 0:
+            peb = pbi.PebBaseAddress
+            pe = rpm(h, peb, 0x400)
+            if pe:
+                cdat["BeingDebugged"] = pe[2]
+                cdat["NtGlobalFlag"] = hex(struct.unpack_from("<I", pe, 0xBC)[0])
+                cdat["peb_image_base"] = hex(struct.unpack_from("<Q", pe, 0x10)[0])
 
-# --- globals page (RVA 0x61000-0x64000 of the child image)
-ib = report["values"].get("child_image_base")
-ib = int(ib, 16) if ib else None
-
-def child_rva(rva, size):
-    return rpm(h, ib + rva, size) if ib else None
-
-if ib:
-    g = child_rva(0x63DC0, 0xA0)
-    if g:
-        vals = {}
-        for i, name in enumerate(["g63DC0", "blob1_ptr", "blob1_end", "blob2_ptr", "blob2_end",
-                                  "g63E00", "g63E08", "g63E10", "g63E14", "g63E18",
-                                  "g63E20", "g63E28", "g63E30", "g63E38", "g63E40",
-                                  "g63E48", "g63E50"]):
-            vals[name] = hex(struct.unpack_from("<Q", g, i * 8)[0])
-        vals["g625B4"] = hex(struct.unpack("<I", child_rva(0x625B4, 4))[0]) if child_rva(0x625B4, 4) else None
-        report["values"]["globals"] = vals
-        # constants for the solver
-        for rva, name, size in [(0x61CA0, "T64", 0x100), (0x61DA0, "const2048", 0x800)]:
-            d = child_rva(rva, size)
-            if d:
-                fn = dump_region(h, ib + rva, size, f"{name}.bin")
-                report["dumps"].append({"name": name, "rva": hex(rva), "file": fn})
-        # blobs via pointers
-        vals2 = report["values"]["globals"]
-        b1p, b1e = int(vals2["blob1_ptr"], 16), int(vals2["blob1_end"], 16)
-        b2p, b2e = int(vals2["blob2_ptr"], 16), int(vals2["blob2_end"], 16)
-        for p, e, name in [(b1p, b1e, "blob1"), (b2p, b2e, "blob2")]:
-            if e > p and e - p <= 0x1000:
-                d = rpm(h, p, e - p)
+        # full memory walk: find the unpacked original image via .text signature
+        image_base = None
+        addr = 0
+        mbi = MBI64()
+        regions = []
+        while addr < 0x7FFFFFFF0000:
+            if k32.VirtualQueryEx(h, ctypes.c_void_p(addr), ctypes.byref(mbi), ctypes.sizeof(mbi)) == 0:
+                break
+            if mbi.State == 0x1000 and mbi.Protect not in (0x01,) and not (mbi.Protect & 0x100):
+                regions.append((mbi.BaseAddress, mbi.RegionSize, mbi.Protect))
+            addr = mbi.BaseAddress + mbi.RegionSize
+        cdat["regions"] = len(regions)
+        for base, size, prot in regions:
+            if size < 0x61000:
+                continue
+            # test: does this region start at an image RVA-0 boundary? read at +0x30738
+            d = rpm(h, base + 0x30738, 0x40)
+            if d and sig and d == sig:
+                image_base = base
+                break
+            # also search anywhere inside big regions
+            if size >= 0x100000 and sig:
+                d = rpm(h, base, min(size, 0x3000000))
                 if d:
-                    fn = dump_region(h, p, e - p, f"{name}.bin")
-                    report["dumps"].append({"name": name, "ptr": hex(p), "size": e - p, "file": fn})
-        # write-watch page
-        wwp = int(vals2["g63E08"], 16)
-        d = rpm(h, wwp, 0x1000)
-        if d:
-            fn = dump_region(h, wwp, 0x1000, "writewatch_page.bin")
-            report["dumps"].append({"name": "writewatch_page", "ptr": hex(wwp), "file": fn})
+                    i = d.find(sig)
+                    if i >= 0:
+                        image_base = base + i - 0x30738
+                        break
+        cdat["image_base"] = hex(image_base) if image_base else None
+        print(f"[*] child {pid}: image_base={cdat['image_base']} regions={cdat['regions']} BD={cdat.get('BeingDebugged')}")
 
-# --- stacks of all threads
-stack_hits = []
-for tid in threads_of(cpid):
-    th = k32.OpenThread(THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION | THREAD_SUSPEND_RESUME, False, tid)
-    if not th:
-        continue
-    ctx = CONTEXT64()
-    ctx.ContextFlags = 0x100010  # CONTEXT_DEBUG_REGISTERS|CONTEXT_AMD64 -- full needed
-    ctx.ContextFlags = 0x10003B  # CONTEXT_FULL|CONTEXT_AMD64 (float+ctrl+int)
-    k32.SuspendThread(th)
-    ok = k32.GetThreadContext(th, ctypes.byref(ctx))
-    k32.ResumeThread(th)
-    k32.CloseHandle(th)
-    if not ok:
-        continue
-    rsp, rbp = ctx.Rsp, ctx.Rbp
-    print(f"[*] thread {tid}: rsp={hex(rsp)} rbp={hex(rbp)} rip={hex(ctx.Rip)} dr2={hex(ctx.Dr2)} dr3={hex(ctx.Dr3)}")
-    stack = rpm(h, rsp & ~0xF, 0x18000)  # 96 KiB above rsp
-    if not stack:
-        continue
-    base = rsp & ~0xF
-    # marker: the masqueraded path string lives at [rbp+0x690]
-    marker = b"sihost.exe"
-    pos = 0
-    while True:
-        i = stack.find(marker, pos)
-        if i < 0:
-            break
-        # candidate rbp: string addr - 0x690
-        str_addr = base + i
-        rbp_c = str_addr - 0x690
-        off = rbp_c - base
-        if off >= 0 and off + 0x800 < len(stack):
-            # validate: [rbp_c+0x7F0] should be small, [rbp_c+0xB0] arbitrary qword
-            arg5 = struct.unpack_from("<Q", stack, off + 0x78)[0]
-            b0 = struct.unpack_from("<Q", stack, off + 0xB0)[0]
-            # [rbp+0x690] string must START at rbp+0x690: path begins with 'C:'
-            s = stack[i - 2:i + 10]
-            if s[:2] in (b"C:", b"c:"):
-                stack_hits.append({"tid": tid, "rbp_main": hex(rbp_c),
-                                   "arg5": hex(arg5), "rbpB0": hex(b0)})
-        pos = i + 1
-    fn = dump_region(h, base, len(stack), f"stack_tid{tid}.bin")
-    report["dumps"].append({"name": f"stack_tid{tid}", "base": hex(base), "size": len(stack), "file": fn})
+        if image_base:
+            # globals + constants from the REAL image
+            g = rpm(h, image_base + 0x63DC0, 0xA0)
+            if g:
+                vals = {}
+                names = ["g63DC0", "blob1_ptr", "blob1_end", "blob2_ptr", "blob2_end", "g63E00",
+                         "g63E08", "g63E10", "g63E14", "g63E18", "g63E20", "g63E28", "g63E30",
+                         "g63E38", "g63E40", "g63E48", "g63E50"]
+                for i, name in enumerate(names):
+                    vals[name] = hex(struct.unpack_from("<Q", g, i * 8)[0])
+                v = rpm(h, image_base + 0x625B4, 4)
+                if v:
+                    vals["g625B4"] = hex(struct.unpack("<I", v)[0])
+                cdat["globals"] = vals
+                for rva, name, size in [(0x61CA0, "T64", 0x100), (0x61DA0, "const2048", 0x800)]:
+                    d = rpm(h, image_base + rva, size)
+                    if d:
+                        fn = os.path.join(DUMPDIR, f"{tag}_{name}.bin")
+                        open(fn, "wb").write(d)
+                        cdat[name] = fn
+                        import zlib
+                        cdat[name + "_crc"] = hex(zlib.crc32(d)) if size == 0x800 else None
+                # the child marker
+                hdr = rpm(h, image_base + 0x28, 8)
+                if hdr:
+                    a, b = struct.unpack("<II", hdr)
+                    cdat["child_marker_ok"] = (a ^ 0x31415926) == b
 
-report["values"]["stack_hits"] = stack_hits
+        # thread stacks
+        stack_hits = []
+        for tid in threads_of(pid):
+            th = k32.OpenThread(THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION | THREAD_SUSPEND_RESUME, False, tid)
+            if not th:
+                continue
+            ctx = CTX64()
+            ctx.ContextFlags = 0x10003F  # CONTEXT_ALL-ish
+            k32.SuspendThread(th)
+            ok = k32.GetThreadContext(th, ctypes.byref(ctx))
+            k32.ResumeThread(th)
+            k32.CloseHandle(th)
+            if not ok:
+                continue
+            rsp = ctx.Rsp
+            if not (0x10000 < rsp < 0x7FFFFFFFFFFF):
+                continue
+            stack = rpm(h, (rsp - 0x100) & ~0xF, 0x20000)
+            if not stack:
+                continue
+            sbase = (rsp - 0x100) & ~0xF
+            fn = os.path.join(DUMPDIR, f"{tag}_stack_tid{tid}.bin")
+            open(fn, "wb").write(stack)
+            print(f"[*]   thread {tid}: rsp={hex(rsp)} rip={hex(ctx.Rip)} dr2={hex(ctx.Dr2)} dr3={hex(ctx.Dr3)} stack saved ({len(stack)} bytes from {hex(sbase)})")
+            # find main rbp: ASCII path 'C:\' followed later by '.exe' near [rbp+0x690]
+            pos = 0
+            while True:
+                i = stack.find(b":\\Users\\", pos)
+                if i < 0:
+                    break
+                # walk back to the drive letter
+                j = i - 2
+                if j >= 0 and stack[j:j + 2] in (b"C:", b"c:"):
+                    str_addr = sbase + j
+                    rbp_c = str_addr - 0x690
+                    off = rbp_c - sbase
+                    if 0 <= off and off + 0x800 < len(stack):
+                        arg5 = struct.unpack_from("<Q", stack, off + 0x78)[0]
+                        b0 = struct.unpack_from("<Q", stack, off + 0xB0)[0]
+                        a8 = struct.unpack_from("<Q", stack, off + 0xA8)[0]
+                        v80 = struct.unpack_from("<Q", stack, off + 0x80)[0]
+                        stack_hits.append({"tid": tid, "rbp_main": hex(rbp_c), "arg5": hex(arg5),
+                                           "rbpB0": hex(b0), "rbpA8": hex(a8), "rbp80": hex(v80),
+                                           "path": stack[j:j + 120].split(b"\x00")[0].decode(errors="replace")})
+                pos = i + 1
+        cdat["stack_hits"] = stack_hits
+        report["values"][str(pid)] = cdat
+    finally:
+        k32.CloseHandle(h)
 
-# also record this machine's pid for the Dr2/Dr3 chain verification
-report["values"]["child_pid"] = cpid
-
-k32.CloseHandle(h)
-watcher.stop()
-
-# terminate
-try:
-    psutil.Process(cpid).kill()
-except Exception:
-    pass
+# ---------------------------------------------------------------- cleanup
+for pid in children:
+    try:
+        psutil.Process(pid).kill()
+    except Exception:
+        pass
 try:
     if proc.isalive():
         proc.terminate(force=True)
@@ -411,4 +340,3 @@ except Exception:
 with open(OUT, "w", encoding="utf-8") as f:
     json.dump(report, f, indent=2)
 print(f"\n[+] report: {OUT}")
-print(json.dumps(report["values"], indent=2)[:3000])
