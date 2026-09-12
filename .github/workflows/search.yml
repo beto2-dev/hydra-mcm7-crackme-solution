@@ -24,7 +24,9 @@ jobs:
       - name: Run selftest
         run: |
           cd solution/keygen
-          ./hydra_search_avx2 ../emulator/probes 0 100
+          # exit 1 == "no hit in range" (expected); the self-check inside
+          # prints PASS/FAIL and aborts with rc 2 on any mismatch
+          ./hydra_search_avx2 ../emulator/probes 0 100 || [ $? -eq 1 ]
 
       - name: Search shard
         run: |
@@ -43,7 +45,7 @@ jobs:
               f.write(f"{lo:x} {hi:x}\n")
           EOF
           read LO HI < range.txt
-          ./hydra_search_avx2 ../emulator/probes "$LO" "$HI"
+          ./hydra_search_avx2 ../emulator/probes "$LO" "$HI" || [ $? -eq 1 ]
 
       - name: Upload results
         if: always()
