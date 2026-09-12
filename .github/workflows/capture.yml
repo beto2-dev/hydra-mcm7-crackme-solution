@@ -1,0 +1,43 @@
+name: Capture check() args
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  capture:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Relax Defender for analysis sandbox
+        shell: powershell
+        run: |
+          try {
+            Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE" -ErrorAction Stop
+            Add-MpPreference -ExclusionProcess "CrackMe_packed.exe" -ErrorAction Stop
+            Write-Host "Defender exclusions added"
+          } catch { Write-Host "Defender: $_" }
+
+      - name: Run argument capture
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          python tools/capture_args.py binaries/CrackMe_packed.exe evidence/args_capture.json evidence/capture
+          Get-ChildItem evidence -Recurse | Select-Object FullName, Length | Format-Table | Out-String | Write-Host
+
+      - name: Upload capture
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: args-capture
+          path: evidence/
+          if-no-files-found: warn
