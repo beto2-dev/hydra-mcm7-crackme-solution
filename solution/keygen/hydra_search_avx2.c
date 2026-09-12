@@ -216,10 +216,23 @@ int main(int argc, char **argv) {
     for (uint64_t c = start; c < end; ) {
         b.n = 0;
         for (int k = 0; k < 8 && c < end; k++, c++) {
-            int n = 8;
-            memcpy(b.pwd[k], "HydraKey", 8);
-            for (int i = 0; i < 8; i++)
-                b.pwd[k][n++] = "0123456789abcdef"[(c >> (4 * (7 - i))) & 0xF];
+            int n;
+            if (c < 0x100000000ull) {
+                /* short form: HydraKey + 8 hex */
+                n = 8;
+                memcpy(b.pwd[k], "HydraKey", 8);
+                for (int i = 0; i < 8; i++)
+                    b.pwd[k][n++] = "0123456789abcdef"[(c >> (4 * (7 - i))) & 0xF];
+            } else {
+                /* extended form: Hk + 10 base-94 digits of the counter */
+                n = 2;
+                memcpy(b.pwd[k], "Hk", 2);
+                uint64_t v = c - 0x100000000ull;
+                uint8_t digits[10];
+                for (int i = 9; i >= 0; i--) { digits[i] = v % 94; v /= 94; }
+                for (int i = 0; i < 10; i++)
+                    b.pwd[k][n++] = (uint8_t)(0x21 + digits[i]);
+            }
             b.len[k] = n;
             b.n++;
         }
