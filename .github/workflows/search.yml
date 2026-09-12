@@ -1,0 +1,56 @@
+name: Typable Password Search
+
+on:
+  workflow_dispatch:
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    timeout-minutes: 350
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          cd solution/keygen
+          gcc -O3 -mavx2 -funroll-loops -o hydra_search_avx2 \
+            hydra_search_avx2.c hydra_core.c hydra_vm.c hydra_data.c -I.
+
+      - name: Run selftest
+        run: |
+          cd solution/keygen
+          ./hydra_search_avx2 ../emulator/probes 0 100
+
+      - name: Search shard
+        run: |
+          cd solution/keygen
+          SHARD=${{ matrix.shard }}
+          TOTAL=16
+          # 2^32 range split into TOTAL shards
+          python3 - "$SHARD" "$TOTAL" << 'EOF'
+          import sys
+          shard, total = int(sys.argv[1]), int(sys.argv[2])
+          span = (1 << 32) // total
+          lo = shard * span
+          hi = (1 << 32) if shard == total - 1 else (shard + 1) * span
+          print(f"::group::shard {shard} range [{lo:x}, {hi:x})")
+          with open("range.txt", "w") as f:
+              f.write(f"{lo:x} {hi:x}\n")
+          EOF
+          read LO HI < range.txt
+          ./hydra_search_avx2 ../emulator/probes "$LO" "$HI"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: search-shard-${{ matrix.shard }}
+          path: |
+            solution/keygen/found_password.txt
+            solution/keygen/range.txt
+          if-no-files-found: ignore
