@@ -343,7 +343,36 @@ def run_once(instance):
     r["prompt_children"] = [i.get("exe") for i in children.values()]
     r["prompt"] = capture_phase(f"i{instance}_prompt", children)
 
-    # send a test password and capture post-verdict state (arg2 now in [rbp+0x7F8])
+    # send a test password and RACE-capture arg2 from [rbp+0x7F8]
+    race_vals = []
+    rbp_mains = []
+    for pid, c in r["prompt"].items():
+        for hit in c.get("stack_hits", []):
+            rbp_mains.append((pid, int(hit["rbp_main"], 16)))
+    race_stop = threading.Event()
+
+    def racer():
+        if not rbp_mains:
+            return
+        pid, rbp_main = rbp_mains[0]
+        h = k32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
+        if not h:
+            return
+        buf = ctypes.create_string_buffer(16)
+        got = ctypes.c_size_t(0)
+        last = None
+        t0 = time.time()
+        while not race_stop.is_set() and time.time() - t0 < 5.0:
+            if k32.ReadProcessMemory(h, ctypes.c_void_p(rbp_main + 0x7F8), buf, 8, ctypes.byref(got)):
+                v = struct.unpack("<Q", buf.raw[:8])[0]
+                if v != last:
+                    race_vals.append((round(time.time() - t0, 4), hex(v)))
+                    last = v
+        k32.CloseHandle(h)
+
+    rt = threading.Thread(target=racer, daemon=True)
+    rt.start()
+    time.sleep(0.05)
     try:
         proc.write("CaptureProbe99\r")
     except Exception:
@@ -353,7 +382,11 @@ def run_once(instance):
         out = "".join(readbuf)
         if "DENIED" in out or "NICE" in out or not proc.isalive():
             break
-        time.sleep(0.2)
+        time.sleep(0.1)
+    race_stop.set()
+    rt.join(timeout=2)
+    r["arg2_race"] = race_vals
+    print(f"[*] arg2 race values: {race_vals}")
     time.sleep(1.0)
     r["console_full"] = "".join(readbuf)
     # refresh child map (same pids)
