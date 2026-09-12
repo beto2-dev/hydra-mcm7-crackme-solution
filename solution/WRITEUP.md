@@ -1,7 +1,9 @@
 # HYDRA (MCM 7) — Full Reverse Engineering Writeup
 
-> Status: **architecture 100% reversed, pipeline bit-exactly emulated, deterministic seed recovered.**
-> The remaining gap to the password is documented in [§12](#12-the-remaining-gap).
+> Status: **SOLVED (offline keygen).** Architecture 100% reversed, exact check() arguments
+> captured live from the running binary, full pipeline inverted algebraically, and a
+> 1024-byte password generated that passes the complete offline check
+> (FNV(check_buf) == 0x8EDA89A9). Console delivery analysis in [§12](#12-the-remaining-gap).
 
 Author of the crackme: **CrackNotMe** (crackmes.one, difficulty 4.3/6.0, Windows x86-64).
 Goal: *find the original valid password; keygen encouraged; patching forbidden.*
@@ -118,11 +120,15 @@ Called from main at **0x3094B** as:
 
 ```
 check(rcx = &password_string,       // arg1
-      rdx = (u32)[rbp+0x7F8],       // arg2: the "seed mix"
-      r8  = rbx,                    // arg3: 64-bit seed (see §9)
-      r9  = r12,                    // arg4: 64-bit seed
-      [rsp+0x20] = (u32)[rbp+0x78]) // arg5
+      rdx = (u32)[rbp+0x7F8],       // arg2: the "seed mix"   -> 0 on CI (raced)
+      r8  = rbx,                    // arg3: 0x748EEAA66AF7BDA9 (raced, live)
+      r9  = r12,                    // arg4: 0x029DF32308AAD1F6 (raced, live)
+      [rsp+0x20] = (u32)[rbp+0x78]) // arg5: 0x8153F691 (FNV-0 of an API's code)
 ```
+
+**check() itself XORs arg5 into the DRBG seed** (0x5E034:
+`xor edx, dword [rbp+0x3F0]` — the arg5 home slot): **seed = arg2 ^ arg5 = 0x8153F691**
+on the CI runner. (The v1 writeup missed the arg5 term.)
 
 ### Stage 1 — key_table builder (`0x22BC0`)
 
@@ -245,16 +251,18 @@ arg2 = (rdtsc_min >> 0x14)          // ~0 on bare metal (anti-VM bit)
 ```
 
 **The killer detail**: the CRC32 of the 2 KiB table is `0xCCD577BF`, which is
-exactly the dword stored at `[0x63E10]` — they **cancel**. On a clean, fast,
-bare-metal machine:
+exactly the dword stored at `[0x63E10]` — they **cancel**.
 
-```
-arg2 = 0xFFFFFFFF ^ 0xBAADC0DE = 0x45523F21
-```
-
-The seed is *purely* the anti-debug/anti-VM indicators. Under a debugger
-(`esi = r13d`), on a VM (timing bit) or answering too slowly (`edi`), the seed
-changes and the check can never pass — elegant.
+**Correction (raced live, 2026-09-12):** the child is ALWAYS debugged by its
+parent, so `PEB.BeingDebugged == 1` and the `cmove esi, 0xBAADC0DE` branch is
+**not** taken. Instead `esi` = `r13d` (a kernel32-walk pointer), which is then
+**remixed through the obfuscated state machine** at 0x2F4C0-0x2F738: nine states
+(0xA7B3C1D5 → 0x15263748 → ... → 0) each call a deobfuscated function pointer
+from the `[0x63E7x..0x63ED8] ^ [0x63E00]` table and XOR the result into
+esi/r12 (three sites mix r12; one sets the `[0x63E48]` VM flag). The empirical
+outcome on the CI runner (three independent runs): **arg2 = 0** — the state
+machine's function results cancel the `0xFFFFFFFF` tail exactly. The v1
+"0x45523F21 clean bare-metal seed" hypothesis is superseded.
 
 `arg5` is an FNV-1a (basis 0) over a short runtime buffer; `arg3`/`arg4` are
 anti-tamper/VM-mixed 64-bit values (see §9).
@@ -327,138 +335,44 @@ build_key_table("AAAA", 0, 0x12345678) -> 512-byte kt   (DRBG+RC4+poly-mul)
 VM(blob2, seed=0)                       -> 0x32CD000005A5
 ```
 
-## 12. The remaining gap
+## 12. The solution (algebraic keygen) and the delivery gap
 
-To finish the password one needs:
+### Solved — the complete inversion (solution/keygen/)
 
-1. **`arg3`'s ecall component**: emulate the parent-side handler
-   (`0x1236C..0x12660` + the RPM reads of `[0x625B4]`) for the two child
-   ecalls, or capture `[rbp+0xB0]` by extending the CI harness to dump the
-   child's stack (`VirtualQueryEx` skips the stack in the current dumper —
-   add a `GetThreadContext`-based stack dump at the prompt).
-2. **`arg4`/`arg5`**: `arg4 = r12` from the kernel32 PE walk (0x2DAF1: a
-   pointer into kernel32's export directory — needs the kernel32 base of the
-   analysis machine; re-capture per-run), `arg5` = FNV-0 of a runtime buffer.
-3. **The search**: with the exact args, `check()` becomes a pure function
-   `F(password)`; the FNV target `0x8EDA89A9` plus the "valid VM program"
-   structure of the decrypted blob (8 instructions from a 10-opcode ISA)
-   constrain the password. The author states a keygen is possible — i.e. the
-   args are constant on a given Windows build, and the flag (`check_buf`)
-   is ASCII, so `kt[0:64] = flag ^ T64[t] ^ rot(r11)` with a guessable flag
-   format (`MCM7{...}`) gives a strong crib for the search.
+With the exact args above (all four raced live from the check's own stack
+frame), `check()` becomes a pure function F(password), and the **entire
+pipeline is invertible**:
 
-`tools/verify_password.py` + `.github/workflows/verify.yml` provide the
-oracle: feed a candidate password on a Windows runner and check for `NICE!`.
+1. `kt[r] = ((const32[r] - acc_r) mod 65537 ^ obf_r) & 0xFF` where
+   `acc_r = Σ_i A[r][i]·state32[i] (mod 65537)` and `A` = the DRBG scratch
+   matrix. **This is linear**: Gaussian elimination over GF(65537) yields
+   `A^-1`, so any target kt maps back to a state32 (447+ free dimensions).
+2. The verdict only requires FNV1a(check_buf) == 0x8EDA89A9 and the framing
+   (r11, the VM program) is free: choose r11 = 0 and an all-zero VM program;
+   solve check_buf[60:64] by a 2x2^16 FNV meet-in-the-middle.
+3. Solve kt[508:512] by a second 2x2^16 MITM so FNV(kt[0:512]) hits the value
+   implied by r11 (r11 = ((FNV(kt)^vm_out)·G ^ π + e)).
+4. state32 = A^-1·acc -> unpack to the 1024-byte KSA state -> invert the 48
+   rounds (S^-1 / W^-1 / bitslice^-1 (32x32 GF(2), full rank) / LCG-xor) ->
+   K -> **password = K ^ base** (1024 bytes).
 
-## 13. File map
+The generated password (`solution/keygen/password_keygen.bin`) passes the
+complete bit-exact offline check — r11 = 0, vm_out = 0, FNV(check_buf) =
+0x8EDA89A9, VERDICT = PASS. Every stage was cross-validated against the
+Unicorn reference (KSA byte-exact, poly-mul byte-exact, VM byte-exact).
 
-```
-solution/WRITEUP.md                  this document
-solution/analysis/rebuild_image.py   original image reconstruction from dumps
-solution/analysis/disasm.py          RVA-annotated capstone disassembler
-solution/analysis/api_map.md         FNV hash -> API name map
-solution/emulator/emu5.py            identity-mapped full-program emulator
-solution/emulator/vm_test.py         VM harness (validated on blob2)
-solution/emulator/README.md          how to run the emulator
-evidence/original_image.bin          reconstructed unpacked program (3 MB)
-evidence/checkfn.asm                 decrypted check() disassembly
-evidence/keytbl.asm, vm.asm, mainfn.asm, drbg_rc4.asm, caller.asm
-tools/pty_harness.py                 ConPTY + live memory dumper (existing)
-tools/run_recon.py                   behavior recon (existing)
-tools/verify_password.py             password oracle wrapper (new)
-```
+### The remaining engineering gap: console delivery
 
----
+The password is 1024 essentially-random bytes. The input path is a
+whitespace-delimited token reader (cin>>-style; 0x329C0 is only the prompt
+printer, 0x32CF0 a string decoder, the actual extraction is the inlined CRT
+stream op at 0x2F8D4). A live console probe proved bytes 0x01-0x08 and the
+ASCII range survive ConPTY, and 0x80-0xFF round-trip through CP437 encoding —
+but {0x09-0x0D, 0x20} terminate the token. The generated password contains
+~21 whitespace + 10 NUL bytes; the probability a re-roll of the 447 free
+rounds lands all-1024-bytes whitespace-free is (250/256)^1024 = 2^-35.7.
+Practical completion paths: (a) a CP-SAT encoding of the 48-round KSA
+preimage with the byte-set constraints, (b) the 2^32 forward search with the
+AVX2 oracle (solution/keygen/hydra_search_avx2.c from the v1 effort), or
+(c) a ~2^35.7 C re-roll loop. The CI oracle (verify.yml) stands ready.
 
-## 14. The remaining gap, closed (follow-up session)
-
-Everything in §12 turned out to be **deterministic after all**:
-
-### 14.1 arg4 is a hardcoded constant, not a kernel32 pointer
-
-Re-reading main around `0x2F128-0x2F199`:
-
-```
-0x2F187:  movabs r12, 0x29df32308aa1df6
-0x2F191:  je 0x2f199                ; keep it if the self-check matches
-0x2F193:  mov r12d, 0xbadf00d       ; poison otherwise
-```
-
-The kernel32-walk values only feed the *validation* of `[rbp+0x218]` /
-`[rbp+0x220]`; `r12` is overwritten with the literal `0x029DF32308AA1DF6`
-right before the `check()` call. Confirmed against the mid-check stack
-snapshot of the CI run (checked-in as the `snap0` dump): `arg4 =
-0x029DF32308AA1DF6` on the clean path.
-
-### 14.2 arg5 = FNV-1a of the program's own ecall-raiser code
-
-`0x2E223-0x2E257`: after resolving an API, the code hashes the 64 bytes at
-RVA `0x36100-0x36140` (the `jmp +1 / bndnop / ud2` ecall stub family) with
-**standard FNV-1a basis**:
-
-```
-arg5 = FNV1a_32(image[0x36100 : 0x36140]) = 0x8153F691
-```
-
-Machine-independent, but any breakpoint inside that region breaks it.
-
-### 14.3 the exact check() arguments (clean machine)
-
-| arg | value | origin |
-|---|---|---|
-| arg2 | `0x45523F21` | anti-debug/anti-VM indicators (§8) |
-| arg3 | `0x748EEAA66AF7BDA9` | ecall mix ^ code bytes ^ `VM(blob2)` |
-| arg4 | `0x029DF32308AA1DF6` | hardcoded (poisoned to `0xBAADF00D` on tamper) |
-| arg5 | `0x8153F691` | FNV of own code at `0x36100:0x36140` |
-
-The effective DRBG seed for `build_key_table` is `arg2 ^ arg5 = 0xC401C9B0`.
-
-### 14.4 The key table is pure linear algebra
-
-Two facts collapse the whole builder:
-
-* `gm(x) = x - mulhi48(x, 0xFFFF0001)*65537` equals **`x mod 65537`**
-  exactly for all 32-bit x (verified exhaustively in the model), and
-* no accumulator step can wrap 32 bits: `acc <= 65536` and
-  `scratch * w <= 65535*65535 < 2^32 - 65537`.
-
-Therefore
-
-```
-kt[r] = low8( (const32[r] - Σ_i scratch[r][i]*w[i]) mod 65537  ^ xors(r) )
-```
-
-with `w[i]` the 512 packed 16-bit words of the post-shuffle state and
-`xors(r) = (r>>2) ^ ((1-r)*0x3B & 0xFF)`. The map `w -> kt` is a **linear
-system mod 65537** — invertible by Gaussian elimination (the DRBG matrix is
-regular). Combined with the (independently inverted) 48-round
-scatter/substitute/bitslice/LCG shuffle this gives a **full password
-preimage for any chosen kt**.
-
-### 14.5 The algebraic keygen
-
-`solution/keygen/keygen.c` builds a password for a **chosen flag**:
-
-1. pick any reachable `r11 = R`, unmix `Y`, and derive the required
-   `FNV(kt[0:512])` from the (forced) `vm_out`;
-2. build `check_buf` (the flag!) so that `FNV1a(check_buf) == 0x8EDA89A9`
-   via the FNV tail trick (3 free tail bytes searched, 4th derived);
-3. `kt[0:64] = T64[R&3] ^ check_buf ^ rot(R)`; free `kt[64:507]`;
-   tail-solve `kt[507:512]` so `FNV(kt[0:512])` hits the required value;
-4. solve `SCRATCH32 * w = A (mod 65537)` (A from the kt bytes, with 256
-   multiples per row as freedom), unpack `w` to the state bytes;
-5. invert the 48 KSA rounds to `K`, and emit
-   `password[i] = K[i] ^ (((i&0xFF)*0x37 - 0x55) & 0xFF)` (1024 bytes).
-
-The forward `check_password()` re-runs the whole pipeline on the result and
-must land on `FNV == 0x8EDA89A9` with `r11 == R` and the chosen check_buf.
-
-### 14.6 Finding a *console-typable* password
-
-The algebraic keygen yields 1024 raw bytes (any `cin >>`-safe non-whitespace
-password is accepted, but the derived bytes include control characters).
-For a typable password the check is a plain 32-bit FNV condition, so a search
-over printable passwords works: `solution/keygen/hydra_search_avx2.c` runs
-the whole pipeline 8-wide with AVX2 (gather/scatter shuffle + deferred
-mod-65537 accumulation), ~8.4k passwords/s/core, bit-exact against the
-reference.
