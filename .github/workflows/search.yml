@@ -2,6 +2,11 @@ name: Typable Password Search
 
 on:
   workflow_dispatch:
+    inputs:
+      skip:
+        description: 'hex offset to skip within each shard'
+        required: false
+        default: '0' 
 
 jobs:
   search:
@@ -33,17 +38,17 @@ jobs:
           cd solution/keygen
           SHARD=${{ matrix.shard }}
           TOTAL=16
-          # 2^32 range split into TOTAL shards
-          python3 - "$SHARD" "$TOTAL" << 'EOF'
+          SKIP=${{ github.event.inputs.skip || '0' }}
+          # 2^32 range split into TOTAL shards, optionally skipping a prefix
+          python3 - "$SHARD" "$TOTAL" "$SKIP" > range.txt << 'PYEOF'
           import sys
-          shard, total = int(sys.argv[1]), int(sys.argv[2])
+          shard, total, skip = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3], 16)
           span = (1 << 32) // total
-          lo = shard * span
+          lo = shard * span + skip
           hi = (1 << 32) if shard == total - 1 else (shard + 1) * span
-          print(f"::group::shard {shard} range [{lo:x}, {hi:x})")
-          with open("range.txt", "w") as f:
-              f.write(f"{lo:x} {hi:x}\n")
-          EOF
+          print(f"{lo:x} {hi:x}")
+          PYEOF
+          cat range.txt
           read LO HI < range.txt
           ./hydra_search_avx2 ../emulator/probes "$LO" "$HI" || [ $? -eq 1 ]
 
