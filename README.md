@@ -39,9 +39,40 @@ evidence/   Reconstructed unpacked program, memory dumps, disassemblies,
 | Key-table builder + custom VM bit-exact emulation | done (validated) |
 | Deterministic seed recovery (`0x45523F21` on clean bare metal) | done |
 | Trap/decoy map (dead lengths 8/12/27/29, table sabotage) | done |
-| Ecall (parent↔child UD2) protocol | mapped, emulation pending |
-| Password recovery | in progress — see `solution/WRITEUP.md §12` |
+| Ecall (parent↔child UD2) protocol | mapped (values are deterministic constants) |
+| Exact check() arguments (arg2..arg5, all machine-independent) | done (§14) |
+| **Algebraic keygen (password preimage for a chosen flag)** | **done — accepted by the emulated binary** |
+| Pure-C pipeline (kt + VM + verdict) bit-exact with the emulator | done (fuzz + selftest) |
+| Console-typable password search (AVX2, 32-bit FNV condition) | tool ready (`solution/keygen/hydra_search_avx2.c`) |
 | CI verification oracle (`NICE!` = correct password) | ready (`verify.yml`) |
+
+## The keygen
+
+```bash
+# 1. build
+cd solution/keygen
+gcc -O2 -o hydra_selftest hydra_selftest.c hydra_core.c hydra_vm.c hydra_data.c -I.
+gcc -O2 -o keygen        keygen.c        hydra_core.c hydra_vm.c hydra_data.c -I.
+
+# 2. self-test (VM fuzz vs emulator corpus, kt vs emulator, KSA round-trip)
+./hydra_selftest ../emulator/probes
+
+# 3. generate a password for a flag of your choosing (1024 raw bytes;
+#    the binary prints the flag on bare metal / NICE! in a VM)
+./keygen ../emulator/probes 0x21
+# -> forward check: FNV=8eda89a9 ... KEYGEN VALID
+
+# 4. gold verification: the REAL check() code on the generated password
+cd ../emulator
+python3 verify_keygen_gold.py ../keygen/keygen_password.bin
+# -> VERDICT: ACCEPTED, check_buf = 'MCM7{Full_Algebraic_Keygen!}'
+```
+
+The generated password is 1024 raw bytes (the keygen inverts the whole
+chain, and the inversion naturally lands there). For a password a human
+can type, run the AVX2 search instead — the check is a 32-bit FNV
+condition, so a typable password exists and `hydra_search_avx2` finds it
+at ~8.4k passwords/s/core.
 
 ## Quick start
 

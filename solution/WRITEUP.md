@@ -367,3 +367,98 @@ tools/pty_harness.py                 ConPTY + live memory dumper (existing)
 tools/run_recon.py                   behavior recon (existing)
 tools/verify_password.py             password oracle wrapper (new)
 ```
+
+---
+
+## 14. The remaining gap, closed (follow-up session)
+
+Everything in §12 turned out to be **deterministic after all**:
+
+### 14.1 arg4 is a hardcoded constant, not a kernel32 pointer
+
+Re-reading main around `0x2F128-0x2F199`:
+
+```
+0x2F187:  movabs r12, 0x29df32308aa1df6
+0x2F191:  je 0x2f199                ; keep it if the self-check matches
+0x2F193:  mov r12d, 0xbadf00d       ; poison otherwise
+```
+
+The kernel32-walk values only feed the *validation* of `[rbp+0x218]` /
+`[rbp+0x220]`; `r12` is overwritten with the literal `0x029DF32308AA1DF6`
+right before the `check()` call. Confirmed against the mid-check stack
+snapshot of the CI run (checked-in as the `snap0` dump): `arg4 =
+0x029DF32308AA1DF6` on the clean path.
+
+### 14.2 arg5 = FNV-1a of the program's own ecall-raiser code
+
+`0x2E223-0x2E257`: after resolving an API, the code hashes the 64 bytes at
+RVA `0x36100-0x36140` (the `jmp +1 / bndnop / ud2` ecall stub family) with
+**standard FNV-1a basis**:
+
+```
+arg5 = FNV1a_32(image[0x36100 : 0x36140]) = 0x8153F691
+```
+
+Machine-independent, but any breakpoint inside that region breaks it.
+
+### 14.3 the exact check() arguments (clean machine)
+
+| arg | value | origin |
+|---|---|---|
+| arg2 | `0x45523F21` | anti-debug/anti-VM indicators (§8) |
+| arg3 | `0x748EEAA66AF7BDA9` | ecall mix ^ code bytes ^ `VM(blob2)` |
+| arg4 | `0x029DF32308AA1DF6` | hardcoded (poisoned to `0xBAADF00D` on tamper) |
+| arg5 | `0x8153F691` | FNV of own code at `0x36100:0x36140` |
+
+The effective DRBG seed for `build_key_table` is `arg2 ^ arg5 = 0xC401C9B0`.
+
+### 14.4 The key table is pure linear algebra
+
+Two facts collapse the whole builder:
+
+* `gm(x) = x - mulhi48(x, 0xFFFF0001)*65537` equals **`x mod 65537`**
+  exactly for all 32-bit x (verified exhaustively in the model), and
+* no accumulator step can wrap 32 bits: `acc <= 65536` and
+  `scratch * w <= 65535*65535 < 2^32 - 65537`.
+
+Therefore
+
+```
+kt[r] = low8( (const32[r] - Σ_i scratch[r][i]*w[i]) mod 65537  ^ xors(r) )
+```
+
+with `w[i]` the 512 packed 16-bit words of the post-shuffle state and
+`xors(r) = (r>>2) ^ ((1-r)*0x3B & 0xFF)`. The map `w -> kt` is a **linear
+system mod 65537** — invertible by Gaussian elimination (the DRBG matrix is
+regular). Combined with the (independently inverted) 48-round
+scatter/substitute/bitslice/LCG shuffle this gives a **full password
+preimage for any chosen kt**.
+
+### 14.5 The algebraic keygen
+
+`solution/keygen/keygen.c` builds a password for a **chosen flag**:
+
+1. pick any reachable `r11 = R`, unmix `Y`, and derive the required
+   `FNV(kt[0:512])` from the (forced) `vm_out`;
+2. build `check_buf` (the flag!) so that `FNV1a(check_buf) == 0x8EDA89A9`
+   via the FNV tail trick (3 free tail bytes searched, 4th derived);
+3. `kt[0:64] = T64[R&3] ^ check_buf ^ rot(R)`; free `kt[64:507]`;
+   tail-solve `kt[507:512]` so `FNV(kt[0:512])` hits the required value;
+4. solve `SCRATCH32 * w = A (mod 65537)` (A from the kt bytes, with 256
+   multiples per row as freedom), unpack `w` to the state bytes;
+5. invert the 48 KSA rounds to `K`, and emit
+   `password[i] = K[i] ^ (((i&0xFF)*0x37 - 0x55) & 0xFF)` (1024 bytes).
+
+The forward `check_password()` re-runs the whole pipeline on the result and
+must land on `FNV == 0x8EDA89A9` with `r11 == R` and the chosen check_buf.
+
+### 14.6 Finding a *console-typable* password
+
+The algebraic keygen yields 1024 raw bytes (any `cin >>`-safe non-whitespace
+password is accepted, but the derived bytes include control characters).
+For a typable password the check is a plain 32-bit FNV condition, so a search
+over printable passwords works: `solution/keygen/hydra_search_avx2.c` runs
+the whole pipeline 8-wide with AVX2 (gather/scatter shuffle + deferred
+mod-65537 accumulation), ~8.4k passwords/s/core, bit-exact against the
+reference.
