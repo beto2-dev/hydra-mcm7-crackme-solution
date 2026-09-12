@@ -343,6 +343,39 @@ def run_once(instance):
     r["prompt_children"] = [i.get("exe") for i in children.values()]
     r["prompt"] = capture_phase(f"i{instance}_prompt", children)
 
+    # string-content racer: watch [rbp+0x88] struct, deref to read the content
+    str_snaps = []
+    str_stop = threading.Event()
+
+    def str_racer():
+        if not rbp_mains:
+            return
+        pid, rbp_main = rbp_mains[0]
+        pid = int(pid)
+        h = k32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
+        if not h:
+            return
+        buf = ctypes.create_string_buffer(0x400)
+        got = ctypes.c_size_t(0)
+        last = None
+        t0 = time.time()
+        while not str_stop.is_set() and time.time() - t0 < 12.0:
+            if k32.ReadProcessMemory(h, ctypes.c_void_p(rbp_main + 0x88), buf, 24, ctypes.byref(got)):
+                ptr, size, cap = struct.unpack("<QQQ", buf.raw[:24])
+                if ptr and 0 < size <= 0x800:
+                    if k32.ReadProcessMemory(h, ctypes.c_void_p(ptr), buf, min(size, 0x300), ctypes.byref(got)):
+                        v = bytes(buf.raw[:min(size, 0x300)])
+                        key = (size, v[:64])
+                        if v != (last or b"")[: len(v)] or (last is None):
+                            str_snaps.append((round(time.time() - t0, 4), size, v.hex()))
+                            last = v
+                            if len(str_snaps) > 40:
+                                break
+        k32.CloseHandle(h)
+
+    rt_str = threading.Thread(target=str_racer, daemon=True)
+    rt_str.start()
+
     # send a test password and RACE-capture the arg2 neighborhood [rbp+0x7C0..rbp+0x810]
     race_vals = []
     rbp_mains = []
@@ -388,10 +421,18 @@ def run_once(instance):
     rt = threading.Thread(target=racer, daemon=True)
     rt.start()
     time.sleep(0.05)
+    # full byte-repertoire probe (CP437 roundtrip encoding for high bytes)
+    probe_bytes = bytes(b for b in range(1, 256) if b not in (0x0A, 0x0D, 0x1B))
     try:
-        proc.write("CaptureProbe99\r")
-    except Exception:
-        pass
+        probe_str = probe_bytes.decode("cp437")
+        proc.write(probe_str + "\r")
+    except Exception as ex:
+        print(f"[!] probe write failed: {ex}")
+        try:
+            proc.write("CaptureProbe99\r")
+        except Exception:
+            pass
+    r["probe_sent"] = probe_bytes.hex()
     deadline = time.time() + 20
     while time.time() < deadline:
         out = "".join(readbuf)
@@ -399,7 +440,10 @@ def run_once(instance):
             break
         time.sleep(0.1)
     race_stop.set()
+    str_stop.set()
     rt.join(timeout=2)
+    rt_str.join(timeout=2)
+    r["string_race"] = str_snaps
     r["arg2_race"] = list(race_vals)
     print(f"[*] arg2 race snapshots: {len(race_vals)}")
     for s in race_vals[:24]:
