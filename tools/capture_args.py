@@ -359,20 +359,29 @@ def run_once(instance):
         h = k32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
         if not h:
             return
-        buf = ctypes.create_string_buffer(0x60)
+        # watch TWO windows: check()'s arg-save slots below rbp, and arg2 above rbp
+        buf = ctypes.create_string_buffer(0x100)
         got = ctypes.c_size_t(0)
-        last = None
+        last1 = last2 = None
+        snaps = []
         t0 = time.time()
-        base_addr = rbp_main + 0x7C0
+        w1 = rbp_main - 0x78   # arg4@-0x68, retaddr@-0x48, arg3@-0x40, arg5@-0x20
+        w2 = rbp_main + 0x7C0   # arg2@+0x7F8
         while not race_stop.is_set() and time.time() - t0 < 12.0:
-            if k32.ReadProcessMemory(h, ctypes.c_void_p(base_addr), buf, 0x50, ctypes.byref(got)):
+            if k32.ReadProcessMemory(h, ctypes.c_void_p(w1), buf, 0x60, ctypes.byref(got)):
+                v = bytes(buf.raw[:0x60])
+                if v != last1:
+                    snaps.append((round(time.time() - t0, 4), 1, v.hex()))
+                    last1 = v
+            if k32.ReadProcessMemory(h, ctypes.c_void_p(w2), buf, 0x50, ctypes.byref(got)):
                 v = bytes(buf.raw[:0x50])
-                if v != last:
-                    race_vals.append((round(time.time() - t0, 4), v.hex()))
-                    last = v
-                    if len(race_vals) > 80:
-                        break
+                if v != last2:
+                    snaps.append((round(time.time() - t0, 4), 2, v.hex()))
+                    last2 = v
+            if len(snaps) > 100:
+                break
         k32.CloseHandle(h)
+        race_vals.extend(snaps)
 
     rt = threading.Thread(target=racer, daemon=True)
     rt.start()
