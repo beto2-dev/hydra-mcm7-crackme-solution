@@ -49,10 +49,12 @@ typedef struct {
     uint8_t  pwd[8][64];
     int      len[8];
     int      n;                       /* number of active lanes */
-    uint16_t w[8][512];              /* packed state words per lane */
 } batch_t;
 
-static void ksa8(const batch_t *b, uint16_t w[8][512]) {
+/* packed state words, i-major, u32 lanes: w[i][lane] — one vector load per column */
+static uint32_t wcol[512][8] __attribute__((aligned(32)));
+
+static void ksa8(const batch_t *b) {
     /* interleaved state: st[i] holds 8 dwords (one per lane) */
     static uint32_t st[1024][8] __attribute__((aligned(32)));
     static uint32_t tmp[1024][8] __attribute__((aligned(32)));
@@ -98,50 +100,46 @@ static void ksa8(const batch_t *b, uint16_t w[8][512]) {
     }
     for (int i = 0; i < 512; i++)
         for (int l = 0; l < 8; l++)
-            w[l][i] = (uint16_t)(st[2*i][l] | (st[2*i+1][l] << 8));
+            wcol[i][l] = (uint32_t)(st[2*i][l] | (st[2*i+1][l] << 8));
 }
 
 /* poly-mul for 8 lanes with deferred reduction */
-static void kt8(const uint16_t w[8][512], uint8_t kt[8][512]) {
+static inline uint8_t kt_byte(uint64_t acc, int r) {
+    uint32_t z = (uint32_t)(acc % 65537);
+    uint32_t val = (CONST32[r] + 65537 - z) % 65537;
+    uint8_t cl = (uint8_t)(val & 0xFF);
+    cl ^= (uint8_t)(r >> 2);
+    cl ^= (uint8_t)((1 - r) * 0x3B);
+    return cl;
+}
+
+static void kt8(uint8_t kt[8][512]) {
     for (int r = 0; r < 512; r++) {
         const uint32_t *row = SCRATCH32 + r * 512;
-        __m256i acc0 = _mm256_setzero_si256();   /* u64 lanes for pwd 0,2,4,6 */
-        __m256i acc1 = _mm256_setzero_si256();   /* u64 lanes for pwd 1,3,5,7 */
-        for (int i = 0; i < 512; i++) {
-            __m256i s = _mm256_set1_epi32((int)row[i]);
-            /* w column i across lanes: build [w0..w7] */
-            uint32_t col[8];
-            for (int l = 0; l < 8; l++) col[l] = w[l][i];
-            __m256i wc = _mm256_loadu_si256((const __m256i_u *)col);
-            /* even lanes (0,2,4,6) */
-            __m256i p0 = _mm256_mul_epu32(wc, s);
-            acc0 = _mm256_add_epi64(acc0, p0);
-            /* odd lanes: shuffles to extract */
-            __m256i wo = _mm256_shuffle_epi32(wc, _MM_SHUFFLE(3, 3, 1, 1));
-            __m256i so = _mm256_shuffle_epi32(s, _MM_SHUFFLE(3, 3, 1, 1));
-            __m256i p1 = _mm256_mul_epu32(wo, so);
-            acc1 = _mm256_add_epi64(acc1, p1);
+        __m256i acc0[4], acc1[4];      /* independent chains, unrolled x4 */
+        for (int u = 0; u < 4; u++) { acc0[u] = _mm256_setzero_si256();
+                                      acc1[u] = _mm256_setzero_si256(); }
+        int i = 0;
+        for (; i + 3 < 512; i += 4) {
+            for (int u = 0; u < 4; u++) {
+                __m256i s  = _mm256_set1_epi32((int)row[i + u]);
+                __m256i wc = _mm256_load_si256((const __m256i *)wcol[i + u]);
+                acc0[u] = _mm256_add_epi64(acc0[u], _mm256_mul_epu32(wc, s));
+                __m256i wo = _mm256_shuffle_epi32(wc, _MM_SHUFFLE(3, 3, 1, 1));
+                __m256i so = _mm256_shuffle_epi32(s,  _MM_SHUFFLE(3, 3, 1, 1));
+                acc1[u] = _mm256_add_epi64(acc1[u], _mm256_mul_epu32(wo, so));
+            }
         }
+        __m256i A0 = _mm256_add_epi64(_mm256_add_epi64(acc0[0], acc0[1]),
+                                     _mm256_add_epi64(acc0[2], acc0[3]));
+        __m256i A1 = _mm256_add_epi64(_mm256_add_epi64(acc1[0], acc1[1]),
+                                     _mm256_add_epi64(acc1[2], acc1[3]));
         uint64_t a0[4], a1[4];
-        _mm256_storeu_si256((__m256i_u *)a0, acc0);
-        _mm256_storeu_si256((__m256i_u *)a1, acc1);
+        _mm256_storeu_si256((__m256i_u *)a0, A0);
+        _mm256_storeu_si256((__m256i_u *)a1, A1);
         for (int l = 0; l < 4; l++) {
-            uint32_t z = (uint32_t)(a0[l] % 65537);
-            uint32_t c = CONST32[r];
-            uint32_t val = (c + 65537 - z) % 65537;
-            uint8_t cl = (uint8_t)(val & 0xFF);
-            cl ^= (uint8_t)(r >> 2);
-            cl ^= (uint8_t)((1 - r) * 0x3B);
-            kt[2*l][r] = cl;
-        }
-        for (int l = 0; l < 4; l++) {
-            uint32_t z = (uint32_t)(a1[l] % 65537);
-            uint32_t c = CONST32[r];
-            uint32_t val = (c + 65537 - z) % 65537;
-            uint8_t cl = (uint8_t)(val & 0xFF);
-            cl ^= (uint8_t)(r >> 2);
-            cl ^= (uint8_t)((1 - r) * 0x3B);
-            kt[2*l+1][r] = cl;
+            kt[2*l][r]     = kt_byte(a0[l], r);
+            kt[2*l+1][r]   = kt_byte(a1[l], r);
         }
     }
 }
@@ -181,7 +179,6 @@ int main(int argc, char **argv) {
            (unsigned long long)end);
 
     batch_t b;
-    uint16_t w[8][512];
     static uint8_t kt[8][512];
     uint8_t cb[64];
     time_t t0 = time(NULL);
@@ -196,8 +193,8 @@ int main(int argc, char **argv) {
             b.len[k] = 16;
             b.n++;
         }
-        ksa8(&b, w);
-        kt8(w, kt);
+        ksa8(&b);
+        kt8(kt);
         check_result_t r;
         int ok = 1;
         for (int l = 0; l < 3; l++) {
@@ -236,8 +233,8 @@ int main(int argc, char **argv) {
             b.len[k] = n;
             b.n++;
         }
-        ksa8(&b, w);
-        kt8(w, kt);
+        ksa8(&b);
+        kt8(kt);
         for (int l = 0; l < b.n; l++) {
             uint32_t r11;
             uint32_t v = finish_lane(kt[l], &r11, cb);
