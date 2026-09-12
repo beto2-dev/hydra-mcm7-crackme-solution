@@ -343,7 +343,7 @@ def run_once(instance):
     r["prompt_children"] = [i.get("exe") for i in children.values()]
     r["prompt"] = capture_phase(f"i{instance}_prompt", children)
 
-    # send a test password and RACE-capture arg2 from [rbp+0x7F8]
+    # send a test password and RACE-capture the arg2 neighborhood [rbp+0x7C0..rbp+0x810]
     race_vals = []
     rbp_mains = []
     for pid, c in r["prompt"].items():
@@ -359,16 +359,19 @@ def run_once(instance):
         h = k32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
         if not h:
             return
-        buf = ctypes.create_string_buffer(16)
+        buf = ctypes.create_string_buffer(0x60)
         got = ctypes.c_size_t(0)
         last = None
         t0 = time.time()
-        while not race_stop.is_set() and time.time() - t0 < 5.0:
-            if k32.ReadProcessMemory(h, ctypes.c_void_p(rbp_main + 0x7F8), buf, 8, ctypes.byref(got)):
-                v = struct.unpack("<Q", buf.raw[:8])[0]
+        base_addr = rbp_main + 0x7C0
+        while not race_stop.is_set() and time.time() - t0 < 12.0:
+            if k32.ReadProcessMemory(h, ctypes.c_void_p(base_addr), buf, 0x50, ctypes.byref(got)):
+                v = bytes(buf.raw[:0x50])
                 if v != last:
-                    race_vals.append((round(time.time() - t0, 4), hex(v)))
+                    race_vals.append((round(time.time() - t0, 4), v.hex()))
                     last = v
+                    if len(race_vals) > 80:
+                        break
         k32.CloseHandle(h)
 
     rt = threading.Thread(target=racer, daemon=True)
@@ -386,8 +389,10 @@ def run_once(instance):
         time.sleep(0.1)
     race_stop.set()
     rt.join(timeout=2)
-    r["arg2_race"] = race_vals
-    print(f"[*] arg2 race values: {race_vals}")
+    r["arg2_race"] = [(t, v) for t, v in race_vals]
+    print(f"[*] arg2 race snapshots: {len(race_vals)}")
+    for t, v in race_vals[:20]:
+        print(f"    {t:8.4f} {v}")
     time.sleep(1.0)
     r["console_full"] = "".join(readbuf)
     # refresh child map (same pids)
