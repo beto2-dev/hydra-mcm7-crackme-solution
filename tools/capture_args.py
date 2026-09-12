@@ -355,6 +355,7 @@ def run_once(instance):
         if not rbp_mains:
             return
         pid, rbp_main = rbp_mains[0]
+        pid = int(pid)
         h = k32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
         if not h:
             return
