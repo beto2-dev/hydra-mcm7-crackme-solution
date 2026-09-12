@@ -2,3 +2,8 @@ evidence/*.json
 evidence/*.dmp
 __pycache__/
 *.pyc
+solution/keygen/hydra_selftest
+solution/keygen/keygen
+solution/keygen/hydra_search
+solution/keygen/hydra_search_avx2
+__pycache__/

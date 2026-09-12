@@ -74,6 +74,13 @@ UC.mem_map(EMU_STACK, EMU_STACK_SZ)
 UC.mem_map(EMU_HEAP, EMU_HEAP_SZ)
 UC.mem_map(FAKE, FAKE_SZ)
 
+# the raw .text dump re-mapped above restored the check() region to its
+# XOR-wrapped rest state; decrypt it again (runtime decrypt->run->re-encrypt)
+_dec = bytearray(UC.mem_read(ORIG_BASE + 0x5E000, 0x3000))
+for i in range(len(_dec)):
+    _dec[i] ^= XORKEY[i % 4]
+UC.mem_write(ORIG_BASE + 0x5E000, bytes(_dec))
+
 _heap_ptr = [EMU_HEAP + 0x100000]
 
 def alloc(size, align=0x20):

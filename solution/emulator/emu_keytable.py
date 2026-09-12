@@ -8,11 +8,13 @@ Environment:
   - libc stubs: malloc(0x3895C), free(0x3886C), chkstk(0x39090)
   - deterministic rdtsc/cpuid
 """
+import os
 import struct
 import sys
 from unicorn import *
 from unicorn.x86_const import *
 
+DUMPS = os.path.join(os.path.dirname(__file__), "../../evidence/dumps/")
 IMG = open(os.path.join(os.path.dirname(__file__), "../../evidence/original_image.bin"), "rb").read()
 XORKEY = bytes.fromhex("54286d44")
 BASE = 0x140000000
@@ -59,7 +61,7 @@ UC.mem_write(BLOB1, blob1)
 UC.mem_write(g(0x63DC8), struct.pack("<Q", BLOB1))
 UC.mem_write(g(0x63DD0), struct.pack("<Q", BLOB1 + 0x20))
 
-_blob2src = open(os.path.join(DUMPS, "pid8140_prompt_0x2535A128000_0x4000.bin"), "rb").read()
+_blob2src = open(os.path.join(DUMPS, "pid8140_prompt_0x2535A128000_0x4000.bin"), "rb").read()  # noqa
 blob2 = _blob2src[0xFC0:0xFC0 + 0x200]
 BLOB2 = alloc(0x400)
 UC.mem_write(BLOB2, blob2)
