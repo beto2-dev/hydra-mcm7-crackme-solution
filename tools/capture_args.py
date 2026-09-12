@@ -398,10 +398,10 @@ def run_once(instance):
         time.sleep(0.1)
     race_stop.set()
     rt.join(timeout=2)
-    r["arg2_race"] = [(t, v) for t, v in race_vals]
+    r["arg2_race"] = list(race_vals)
     print(f"[*] arg2 race snapshots: {len(race_vals)}")
-    for t, v in race_vals[:20]:
-        print(f"    {t:8.4f} {v}")
+    for s in race_vals[:24]:
+        print(f"    {s}")
     time.sleep(1.0)
     r["console_full"] = "".join(readbuf)
     # refresh child map (same pids)
