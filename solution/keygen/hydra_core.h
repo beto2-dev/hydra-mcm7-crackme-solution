@@ -27,7 +27,7 @@
 #define POLY_MAGIC  0x504F4C59u     /* "POLY" */
 
 /* real-machine check() arguments (deterministic, see WRITEUP §12) */
-#define ARG2  0x45523F21u   /* clean seed mix                          */
+#define ARG2  0x00000000u   /* raced live: BeingDebugged=1 path (parent always debugs child) */
 #define ARG3  0x748EEAA66AF7BDA9ull
 #define ARG4  0x029DF32308AA1DF6ull
 #define ARG5  0x8153F691u   /* FNV of own code @ RVA 0x36100:0x36140   */

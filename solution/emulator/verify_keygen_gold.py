@@ -30,7 +30,7 @@ assert len(drbg) == 0x100000
 def hook_splice(uc, address, size, ud):
     rcx = uc.reg_read(xc.UC_X86_REG_RCX)
     edx = uc.reg_read(xc.UC_X86_REG_EDX)
-    assert edx == 0xC401C9B0, f"unexpected seed {edx:#x}"
+    assert edx == (0x8153F691), f"unexpected seed {edx:#x}"
     uc.mem_write(rcx, drbg)
     uc.reg_write(xc.UC_X86_REG_RIP, OB + 0x22C4F)   # skip the call
 
@@ -57,7 +57,7 @@ def mk_string(s: bytes):
     return p
 
 pw = mk_string(pwd)
-ARG2, ARG3, ARG4, ARG5 = 0x45523F21, 0x748EEAA66AF7BDA9, 0x029DF32308AA1DF6, 0x8153F691
+ARG2, ARG3, ARG4, ARG5 = 0x0, 0x748EEAA66AF7BDA9, 0x029DF32308AA1DF6, 0x8153F691
 
 sp = (emu5.EMU_STACK + emu5.EMU_STACK_SZ - 0x300000) & ~0xF
 for reg, val in zip((xc.UC_X86_REG_RCX, xc.UC_X86_REG_RDX, xc.UC_X86_REG_R8, xc.UC_X86_REG_R9),
