@@ -16,6 +16,18 @@ import time
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 CANDIDATE = sys.argv[1] if len(sys.argv) > 1 else "AAAA"
+# decode \xNN-escaped candidates to raw bytes, then CP437-encode for the console
+_cand_raw = CANDIDATE
+if "\\x" in _cand_raw:
+    try:
+        _cand_raw = CANDIDATE.encode("utf-8").decode("unicode_escape").encode("latin1")
+    except Exception:
+        pass
+try:
+    CANDIDATE_CONSOLE = _cand_raw.decode("cp437")
+except Exception:
+    CANDIDATE_CONSOLE = _cand_raw.decode("latin1")
+report_note = f"raw_len={len(_cand_raw)}"
 BIN = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 else "binaries/CrackMe_packed.exe"
 OUT = os.path.abspath("evidence/verify_report.json")
 DUMPDIR = os.path.abspath("evidence/verify_dumps")
@@ -60,7 +72,7 @@ while time.time() < deadline:
 
 if prompt_seen:
     try:
-        proc.write(CANDIDATE + "\r")
+        proc.write(CANDIDATE_CONSOLE + "\r")
     except Exception as e:
         print(f"[!] write failed: {e}")
     deadline = time.time() + 30
