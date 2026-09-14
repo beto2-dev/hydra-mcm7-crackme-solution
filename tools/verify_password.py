@@ -23,6 +23,8 @@ if "\\x" in _cand_raw:
         _cand_raw = CANDIDATE.encode("utf-8").decode("unicode_escape").encode("latin1")
     except Exception:
         pass
+if isinstance(_cand_raw, str):
+    _cand_raw = _cand_raw.encode("latin-1", "replace")
 try:
     CANDIDATE_CONSOLE = _cand_raw.decode("cp437")
 except Exception:
