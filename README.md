@@ -1,6 +1,7 @@
 # HYDRA (MCM 7) — Full Reverse Engineering Solution
 
-> Solved-in-progress by **beto2-dev**
+> **SOLVED 100%** by **beto2-dev** — typable passwords found that the real
+> binary accepts (it prints its flag). See the [final answer](#final-answer).
 
 Complete static + dynamic reverse engineering writeup and solution for
 **CrackNotMe's /\ Hydra \/ (MCM 7)** crackme hosted on
@@ -43,8 +44,22 @@ evidence/   Reconstructed unpacked program, memory dumps, disassemblies,
 | Exact check() arguments (arg2..arg5, all machine-independent) | done (§14) |
 | **Algebraic keygen (password preimage for a chosen flag)** | **done — accepted by the emulated binary** |
 | Pure-C pipeline (kt + VM + verdict) bit-exact with the emulator | done (fuzz + selftest) |
-| Console-typable password search (AVX2, 32-bit FNV condition) | tool ready (`solution/keygen/hydra_search_avx2.c`) |
-| CI verification oracle (`NICE!` = correct password) | ready (`verify.yml`) |
+| Console-typable password search (AVX2, 32-bit FNV condition) | done — 2^32 counters swept, 2 hits |
+| Gold verification (Unicorn, real check() code) | done — both hits verdict=1 |
+| **Real-binary oracle (Windows runner)** | **done — flag printed, 30/30 spawns** |
+
+## Final answer
+
+The real binary **accepts** these typable passwords (16 chars, delivered as
+the console token; the reader NUL-pads them to the 64-byte string the KSA
+consumes) and prints its flag instead of `ACCESS DENIED`:
+
+```
+HydraKey13c5228a   -> flag bytes (hex): 5419a9edc46a7f9881c7b6ac05b5043786f10cd30d1271769cc449fa
+HydraKey4397e1f5   -> flag bytes (hex): cbdc87ce859428444707ab1bdf4901699d0c98bb8eb3229fbb49ec1e
+```
+
+Full details and the verification chain: `solution/WRITEUP.md` §12-13.
 
 ## The keygen
 

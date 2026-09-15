@@ -29,7 +29,7 @@ FNV_P = 0x1000193
 # ---------------------------------------------------------------- machine args (CI)
 ARG2 = 0x00000000
 ARG3 = 0x748EEAA66AF7BDA9
-ARG4 = 0x029DF32308AAD1F6
+ARG4 = 0x029DF32308AA1DF6
 ARG5 = 0x8153F691
 SEED = ARG2 ^ ARG5
 

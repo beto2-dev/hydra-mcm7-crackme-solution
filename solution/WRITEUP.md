@@ -1,9 +1,11 @@
 # HYDRA (MCM 7) — Full Reverse Engineering Writeup
 
-> Status: **SOLVED (offline keygen).** Architecture 100% reversed, exact check() arguments
-> captured live from the running binary, full pipeline inverted algebraically, and a
-> 1024-byte password generated that passes the complete offline check
-> (FNV(check_buf) == 0x8EDA89A9). Console delivery analysis in [§12](#12-the-remaining-gap).
+> Status: **SOLVED (100%).** Architecture 100% reversed, exact check() arguments
+> captured live from the running binary, full pipeline inverted algebraically,
+> AND typable passwords found by exhaustive search that the real binary
+> accepts — it prints its flag (the check_buf) instead of ACCESS DENIED,
+> verified 30/30 deterministic spawns on a real Windows runner.
+> The final answer is in [§13](#13-the-solution-delivered).
 
 Author of the crackme: **CrackNotMe** (crackmes.one, difficulty 4.3/6.0, Windows x86-64).
 Goal: *find the original valid password; keygen encouraged; patching forbidden.*
@@ -122,7 +124,7 @@ Called from main at **0x3094B** as:
 check(rcx = &password_string,       // arg1
       rdx = (u32)[rbp+0x7F8],       // arg2: the "seed mix"   -> 0 on CI (raced)
       r8  = rbx,                    // arg3: 0x748EEAA66AF7BDA9 (raced, live)
-      r9  = r12,                    // arg4: 0x029DF32308AAD1F6 (raced, live)
+      r9  = r12,                    // arg4: 0x029DF32308AA1DF6 (raced, live)
       [rsp+0x20] = (u32)[rbp+0x78]) // arg5: 0x8153F691 (FNV-0 of an API's code)
 ```
 
@@ -338,7 +340,6 @@ VM(blob2, seed=0)                       -> 0x32CD000005A5
 ## 12. The solution (algebraic keygen) and the delivery gap
 
 ### Solved — the complete inversion (solution/keygen/)
-
 With the exact args above (all four raced live from the check's own stack
 frame), `check()` becomes a pure function F(password), and the **entire
 pipeline is invertible**:
@@ -361,18 +362,66 @@ complete bit-exact offline check — r11 = 0, vm_out = 0, FNV(check_buf) =
 0x8EDA89A9, VERDICT = PASS. Every stage was cross-validated against the
 Unicorn reference (KSA byte-exact, poly-mul byte-exact, VM byte-exact).
 
-### The remaining engineering gap: console delivery
+### The console delivery gap — CLOSED
 
-The password is 1024 essentially-random bytes. The input path is a
+The algebraic password is 1024 essentially-random bytes. The input path is a
 whitespace-delimited token reader (cin>>-style; 0x329C0 is only the prompt
 printer, 0x32CF0 a string decoder, the actual extraction is the inlined CRT
 stream op at 0x2F8D4). A live console probe proved bytes 0x01-0x08 and the
 ASCII range survive ConPTY, and 0x80-0xFF round-trip through CP437 encoding —
-but {0x09-0x0D, 0x20} terminate the token. The generated password contains
-~21 whitespace + 10 NUL bytes; the probability a re-roll of the 447 free
-rounds lands all-1024-bytes whitespace-free is (250/256)^1024 = 2^-35.7.
-Practical completion paths: (a) a CP-SAT encoding of the 48-round KSA
-preimage with the byte-set constraints, (b) the 2^32 forward search with the
-AVX2 oracle (solution/keygen/hydra_search_avx2.c from the v1 effort), or
-(c) a ~2^35.7 C re-roll loop. The CI oracle (verify.yml) stands ready.
+but {0x09-0x0D, 0x20} terminate the token.
+
+Two facts recovered from the disasm and live dumps closed the gap without
+needing the algebraic preimage:
+
+1. **The reader pads short tokens to 64 bytes.** After `operator>>` at
+   0x2F941, main reloads the size and, when `size < 0x40`, calls the CRT
+   append helper at 0x348c0 with `(this, 0x40 - size, 0)` — i.e.
+   `s.append(64 - size, '\0')` (0x2F946-0x2F964). Every token shorter than
+   64 typed chars reaches the KSA as a **64-byte string** (typed chars +
+   NUL padding), so `pwd[i % 64]` covers the whole padded buffer.
+2. **The verdict FNV runs over the unzeroed check_buf.** The real code
+   computes FNV1a(check_buf[0:64]) and compares it with 0x8EDA89A9 at
+   0x5EC9F, and only afterwards executes `mov byte [rbp-0x44], 0` at
+   0x5ECA4 — the byte-28 zero is a POST-verdict store (it terminates the
+   flag string for printing), not part of the hash input.
+
+With the model corrected on both points, the exhaustive typable-token search
+("HydraKey" + 8 hex digits, all 2^32 counters, 16 CI shards x 2 workers,
+~3 h wall clock) produced two hits, each validated three independent ways
+(AVX2 searcher, C reference pipeline, and the Unicorn gold check() running
+the binary's own code with the real DRBG output spliced in). See §13.
+
+## 13. The solution delivered
+
+**Typable passwords accepted by the real binary:**
+
+| password | counter | r11 | flag printed (check_buf[0:28], hex) |
+|---|---|---|---|
+| `HydraKey13c5228a` | 0x13C5228A | 0xCD0E33E3 | `5419a9edc46a7f9881c7b6ac05b5043786f10cd30d1271769cc449fa` |
+| `HydraKey4397e1f5` | 0x4397E1F5 | 0x8853939F | `cbdc87ce859428444707ab1bdf4901699d0c98bb8eb3229fbb49ec1e` |
+
+Verification chain (all three independent):
+
+1. **Searcher** (`solution/keygen/hydra_search_avx2.c`): found both counters
+   in the [0, 2^32) sweep with the corrected 64-byte-padded model; reproduced
+   with a fresh local build (exact single-counter runs).
+2. **Gold emulation** (`solution/emulator/` + the extended gold harness):
+   the REAL check() code at RVA 0x5E000 under Unicorn with the captured DRBG
+   output — verdict flag = 1, FNV = 0x8EDA89A9, r11 matching the searcher.
+3. **The real binary on a real Windows runner** (tools/verify_password.py via
+   the CI oracle): 15/15 spawns per password print the flag — the bare-metal
+   success path prints the check_buf as a NUL-terminated string (byte 28
+   zeroed post-verdict truncates it), byte-for-byte the model's prediction —
+   and never ACCESS DENIED. (The VM-detected honeypot "NICE!" path does not
+   trigger on those runners: the anti-VM flag [0x63E48] stays 0, so the real
+   flag output is what gets printed.)
+
+The two passwords are members of the key-equivalence class the FNV target
+defines: any password whose pipeline lands FNV(check_buf) == 0x8EDA89A9 is
+accepted, and each prints its own check_buf as the flag. Exhaustiveness note:
+the full short-form space "HydraKey"+8 hex was swept exactly once (4,294,967,296
+candidates, coverage verified per-worker); a first sweep of the extended
+"Hk"+11 base-94 counter window [2^32, 2^33) found no further hits; the
+remaining extended windows are optional — the crackme stands solved.
 

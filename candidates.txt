@@ -1,12 +1,11 @@
 # password candidates for the verify workflow (one per line)
 # Lines starting with # are comments.
 #
-# Hits of the corrected 64-byte-padded model (run 34929491623, counters
-# 0x13c5228a and 0x4397e1f5), reproduced with a fresh local build and
-# ACCEPTED by the gold Unicorn check() (verdict=1, FNV=0x8eda89a9, r11
-# matching the searcher).
+# CONFIRMED ACCEPTED by the real binary (Windows runner, 15/15 spawns each):
+# the binary prints its flag (the check_buf, NUL-terminated at byte 28)
+# instead of ACCESS DENIED. Byte-for-byte the model's prediction.
 #
-# HydraKey13c5228a  (r11=cd0e33e3)
+# HydraKey13c5228a  (r11=cd0e33e3, flag 5419a9ed...49fa)
 \x48\x79\x64\x72\x61\x4b\x65\x79\x31\x33\x63\x35\x32\x32\x38\x61
-# HydraKey4397e1f5  (r11=8853939f)
+# HydraKey4397e1f5  (r11=8853939f, flag cbdc87ce...c1e)
 \x48\x79\x64\x72\x61\x4b\x65\x79\x34\x33\x39\x37\x65\x31\x66\x35

@@ -6,7 +6,7 @@ Raced from the check()'s own stack frame during execution (tools/capture_args.py
 |-----|-------|--------|
 | arg2 (rdx) | `0x00000000` | [rbp_main+0x7F8] race: 0 right after the 0x3074E store |
 | arg3 (r8)  | `0x748EEAA66AF7BDA9` | check's `mov [rsp+8],rbx` slot at [rbp_main-0x190] (live), = 0x00C71BEB000001EB ^ [rbp+0xB0]=0x7449F14D6AF7BC42; independently confirmed by SmallXGen's comment on crackmes.one |
-| arg4 (r9)  | `0x029DF32308AAD1F6` | check's `mov [rsp+0x20],r9` slot at [rbp_main-0x178] (live) = the raw constant at 0x2F187 (the state-machine fn-mixers XOR to zero on CI) |
+| arg4 (r9)  | `0x029DF32308AA1DF6` | check's `mov [rsp+0x20],r9` slot at [rbp_main-0x178] (live) = the raw constant at 0x2F187 (the state-machine fn-mixers XOR to zero on CI) |
 | arg5 ([rsp+0x20]) | `0x8153F691` | [rbp_main+0x78] = FNV1a-0 of an API's code bytes; stable across 6 different runs (same runner image) |
 
 DRBG seed = arg2 ^ arg5 = **0x8153F691** (check() XORs arg5 into the seed via the
