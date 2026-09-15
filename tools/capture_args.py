@@ -444,6 +444,28 @@ def run_once(instance):
             except Exception:
                 pass
     r["probe_sent"] = probe_bytes.hex()
+
+    # one-shot deep stack dumps right after the input: covers check()'s kt
+    # (somewhere below rbp), check_buf, the input string struct at +0x88 and
+    # the spilled args - written to files for offline model comparison
+    try:
+        pid, rbp_main = rbp_mains[0]
+        pid = int(pid)
+        h2 = k32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
+        if h2:
+            def deep_dump(tag):
+                data = rpm(h2, rbp_main - 0x1000, 0x1200)
+                if data:
+                    fn = os.path.join(DUMPDIR, f"pid{pid}_i{instance}_{tag}_stack_deep.bin")
+                    with open(fn, "wb") as f:
+                        f.write(data)
+                    print(f"[*] deep stack dump: {fn} ({len(data)} bytes)")
+            for tag, dt in (("t02", 0.02), ("t04", 0.04), ("t08", 0.08), ("t20", 0.20)):
+                threading.Thread(target=lambda tg=tag, d=dt: (time.sleep(d), deep_dump(tg)),
+                                 daemon=True).start()
+    except Exception as ex:
+        print(f"[!] deep dump setup failed: {ex}")
+
     deadline = time.time() + 20
     while time.time() < deadline:
         out = "".join(readbuf)
