@@ -445,22 +445,41 @@ def run_once(instance):
                 pass
     r["probe_sent"] = probe_bytes.hex()
 
-    # one-shot deep stack dumps right after the input: covers check()'s kt
-    # (somewhere below rbp), check_buf, the input string struct at +0x88 and
-    # the spilled args - written to files for offline model comparison
+    # one-shot deep stack dumps around the check window: the input string
+    # (MSVC layout: buf/ptr@+0x88, size@+0x98, cap@+0xA0) plus its heap
+    # content, and the kt region below rbp (check's frame), at 20ms..6s so we
+    # bracket the whole (instrumented) check() execution
     try:
         pid, rbp_main = rbp_mains[0]
         pid = int(pid)
         h2 = k32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
         if h2:
             def deep_dump(tag):
-                data = rpm(h2, rbp_main - 0x1000, 0x1200)
+                # stack: kt region + string struct
+                data = rpm(h2, rbp_main - 0x700, 0x820)
                 if data:
                     fn = os.path.join(DUMPDIR, f"pid{pid}_i{instance}_{tag}_stack_deep.bin")
                     with open(fn, "wb") as f:
                         f.write(data)
-                    print(f"[*] deep stack dump: {fn} ({len(data)} bytes)")
-            for tag, dt in (("t02", 0.02), ("t04", 0.04), ("t08", 0.08), ("t20", 0.20)):
+                # string struct + content deref
+                sdat = rpm(h2, rbp_main + 0x88, 0x30)
+                blob = b""
+                if sdat and len(sdat) >= 0x30:
+                    sptr = struct.unpack_from("<Q", sdat, 0)[0]
+                    ssize = struct.unpack_from("<Q", sdat, 0x10)[0]
+                    scap = struct.unpack_from("<Q", sdat, 0x18)[0]
+                    if 0 < ssize <= 0x400 and sptr:
+                        cdata = rpm(h2, sptr, min(ssize, 0x400))
+                        if cdata:
+                            blob = struct.pack("<QQQ", sptr, ssize, scap) + cdata
+                if blob:
+                    fn2 = os.path.join(DUMPDIR, f"pid{pid}_i{instance}_{tag}_string.bin")
+                    with open(fn2, "wb") as f:
+                        f.write(blob)
+                print(f"[*] deep dump {tag}: stack {len(data or b'')}B, string {len(blob)}B")
+            for tag, dt in (("t02", 0.02), ("t05", 0.05), ("t10", 0.10),
+                            ("t30", 0.30), ("t70", 0.70), ("t150", 1.50),
+                            ("t250", 2.50), ("t400", 4.00), ("t600", 6.00)):
                 threading.Thread(target=lambda tg=tag, d=dt: (time.sleep(d), deep_dump(tg)),
                                  daemon=True).start()
     except Exception as ex:
