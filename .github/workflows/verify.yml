@@ -13,7 +13,7 @@ on:
 jobs:
   verify:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,19 +35,24 @@ jobs:
       - name: Read candidates
         shell: pwsh
         run: |
-          # candidates from the workflow input plus the file candidates.txt if present
+          # candidates: the dispatch input (if any) plus candidates.txt lines
+          $all = @()
           $c = "${{ github.event.inputs.candidate }}"
-          if (-not $c) { $c = "AAAA" }
-          $all = @($c)
+          if ($c) { $all += $c }
           if (Test-Path candidates.txt) {
             $all += (Get-Content candidates.txt | Where-Object { $_.Trim() -ne "" -and -not $_.Trim().StartsWith("#") })
           }
+          if ($all.Count -eq 0) { $all += "AAAA" }
           $all | Set-Content evidence_candidates.txt
           Write-Host "Candidates: $($all -join ', ')"
 
       - name: Run verification oracle
         shell: pwsh
         continue-on-error: true
+        env:
+          # the arg2 seed mix on VMs is a per-spawn lottery; retry each
+          # candidate until a clean (arg2 == 0) spawn is drawn
+          VERIFY_ATTEMPTS: 15
         run: |
           $results = @()
           Get-Content evidence_candidates.txt | ForEach-Object {

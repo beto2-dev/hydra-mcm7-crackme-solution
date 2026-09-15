@@ -347,6 +347,12 @@ def run_once(instance):
     str_snaps = []
     str_stop = threading.Event()
 
+    # resolve the target frame before starting the racers (the threads read it)
+    rbp_mains = []
+    for pid, c in r["prompt"].items():
+        for hit in c.get("stack_hits", []):
+            rbp_mains.append((pid, int(hit["rbp_main"], 16)))
+
     def str_racer():
         if not rbp_mains:
             return
@@ -378,10 +384,6 @@ def run_once(instance):
 
     # send a test password and RACE-capture the arg2 neighborhood [rbp+0x7C0..rbp+0x810]
     race_vals = []
-    rbp_mains = []
-    for pid, c in r["prompt"].items():
-        for hit in c.get("stack_hits", []):
-            rbp_mains.append((pid, int(hit["rbp_main"], 16)))
     race_stop = threading.Event()
 
     def racer():
