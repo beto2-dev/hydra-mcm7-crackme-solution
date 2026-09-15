@@ -466,6 +466,36 @@ def run_once(instance):
     except Exception as ex:
         print(f"[!] deep dump setup failed: {ex}")
 
+    # post-verdict heap scan: the DRBG scratch (1 MiB of dwords <= 65536)
+    # may still be readable in the lingering process (freed heap pages keep
+    # their data until exit) - dumped for offline seed recovery
+    try:
+        pid, rbp_main = rbp_mains[0]
+        pid = int(pid)
+        h3 = k32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
+        if h3:
+            mbi = MBI64()
+            addr = 0
+            dumped = 0
+            while addr < 0x7FFFFFFF0000 and dumped < 12:
+                if k32.VirtualQueryEx(h3, ctypes.c_void_p(addr), ctypes.byref(mbi), ctypes.sizeof(mbi)) == 0:
+                    break
+                if (mbi.State == 0x1000 and mbi.RegionSize >= 0x100000
+                        and mbi.Protect in (0x02, 0x04, 0x40)):
+                    data = rpm(h3, mbi.BaseAddress, min(mbi.RegionSize, 0x200000))
+                    if data and len(data) >= 4096:
+                        vals = struct.unpack_from("<1024I", data, 0)
+                        small = sum(1 for v in vals if v <= 0x10000)
+                        fn = os.path.join(DUMPDIR, f"pid{pid}_i{instance}_heap_0x{mbi.BaseAddress:x}.bin")
+                        with open(fn, "wb") as f:
+                            f.write(data)
+                        print(f"[*] heap region dump: {fn} ({len(data)} bytes, dword<=0x10000 frac {small/1024:.2f})")
+                        dumped += 1
+                addr = mbi.BaseAddress + mbi.RegionSize
+            k32.CloseHandle(h3)
+    except Exception as ex:
+        print(f"[!] heap scan failed: {ex}")
+
     deadline = time.time() + 20
     while time.time() < deadline:
         out = "".join(readbuf)
