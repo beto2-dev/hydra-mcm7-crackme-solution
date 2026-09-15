@@ -395,19 +395,19 @@ def run_once(instance):
         h = k32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
         if not h:
             return
-        # watch TWO windows: check()'s arg-save slots below rbp (after the dynamic
-        # LCG buffer sub rsp, alloc in [0x60,0x120] -> frame at rbp-0xA0..rbp-0x198),
-        # and arg2 above rbp
-        buf = ctypes.create_string_buffer(0x200)
+        # watch TWO windows: check()'s locals below rbp (kt at rbp-0x380 after
+        # main's lea rbp,[rsp+0x40] + check's rbp = S-0x3D0 + kt@+0x90, and
+        # check_buf at rbp_check-0x60 = main rbp -0x470), and arg2 above rbp
+        buf = ctypes.create_string_buffer(0x480)
         got = ctypes.c_size_t(0)
         last1 = last2 = None
         snaps = []
         t0 = time.time()
-        w1 = rbp_main - 0x1A0
+        w1 = rbp_main - 0x480
         w2 = rbp_main + 0x7C0   # arg2@+0x7F8
         while not race_stop.is_set() and time.time() - t0 < 12.0:
-            if k32.ReadProcessMemory(h, ctypes.c_void_p(w1), buf, 0x130, ctypes.byref(got)):
-                v = bytes(buf.raw[:0x130])
+            if k32.ReadProcessMemory(h, ctypes.c_void_p(w1), buf, 0x410, ctypes.byref(got)):
+                v = bytes(buf.raw[:0x410])
                 if v != last1:
                     snaps.append((round(time.time() - t0, 4), 1, v.hex()))
                     last1 = v
