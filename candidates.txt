@@ -1,12 +1,9 @@
 # password candidates for the verify workflow (one per line)
 # Lines starting with # are comments.
 #
-# Typable passwords found by the AVX2 search (run 34683958894, shards 6 and 11,
-# counters 0x6d417277 and 0xb77d9659), confirmed against the C reference
-# pipeline and the Unicorn gold check() emulation before submission.
-# \xNN-escaped for the CP437 console delivery path (see tools/verify_password.py).
+# The previous candidates (HydraKey6d417277, HydraKeyb77d9659) were hits of
+# the pre-correction 16-byte model and are rejected by the real binary
+# (the console reader NUL-pads the token to a 64-byte string). They are
+# retired. New hits from the corrected 64-byte model search will be
+# submitted here after the gold (Unicorn) validation.
 #
-# HydraKey6d417277  (r11=81f1db3f)
-\x48\x79\x64\x72\x61\x4b\x65\x79\x36\x64\x34\x31\x37\x32\x37\x37
-# HydraKeyb77d9659  (r11=5785b763)
-\x48\x79\x64\x72\x61\x4b\x65\x79\x62\x37\x37\x64\x39\x36\x35\x39
