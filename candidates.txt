@@ -1,9 +1,12 @@
 # password candidates for the verify workflow (one per line)
 # Lines starting with # are comments.
 #
-# The previous candidates (HydraKey6d417277, HydraKeyb77d9659) were hits of
-# the pre-correction 16-byte model and are rejected by the real binary
-# (the console reader NUL-pads the token to a 64-byte string). They are
-# retired. New hits from the corrected 64-byte model search will be
-# submitted here after the gold (Unicorn) validation.
+# Hits of the corrected 64-byte-padded model (run 34929491623, counters
+# 0x13c5228a and 0x4397e1f5), reproduced with a fresh local build and
+# ACCEPTED by the gold Unicorn check() (verdict=1, FNV=0x8eda89a9, r11
+# matching the searcher).
 #
+# HydraKey13c5228a  (r11=cd0e33e3)
+\x48\x79\x64\x72\x61\x4b\x65\x79\x31\x33\x63\x35\x32\x32\x38\x61
+# HydraKey4397e1f5  (r11=8853939f)
+\x48\x79\x64\x72\x61\x4b\x65\x79\x34\x33\x39\x37\x65\x31\x66\x35
