@@ -23,6 +23,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 BIN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else "binaries/CrackMe_packed.exe"
 OUT = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 else "evidence/args_capture.json"
 DUMPDIR = os.path.abspath(sys.argv[3]) if len(sys.argv) > 3 else "evidence/capture"
+CANDIDATE = sys.argv[4] if len(sys.argv) > 4 else ""   # optional password to send
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 os.makedirs(DUMPDIR, exist_ok=True)
 
@@ -423,17 +424,25 @@ def run_once(instance):
     rt = threading.Thread(target=racer, daemon=True)
     rt.start()
     time.sleep(0.05)
-    # full byte-repertoire probe (CP437 roundtrip encoding for high bytes)
-    probe_bytes = bytes(b for b in range(1, 256) if b not in (0x0A, 0x0D, 0x1B))
-    try:
-        probe_str = probe_bytes.decode("cp437")
-        proc.write(probe_str + "\r")
-    except Exception as ex:
-        print(f"[!] probe write failed: {ex}")
+    # input: a candidate password (ASCII) or the full byte-repertoire probe
+    # (CP437 roundtrip encoding for high bytes) when no candidate is given
+    if CANDIDATE:
+        probe_bytes = CANDIDATE.encode("latin-1", "replace")
         try:
-            proc.write("CaptureProbe99\r")
-        except Exception:
-            pass
+            proc.write(CANDIDATE + "\r")
+        except Exception as ex:
+            print(f"[!] candidate write failed: {ex}")
+    else:
+        probe_bytes = bytes(b for b in range(1, 256) if b not in (0x0A, 0x0D, 0x1B))
+        try:
+            probe_str = probe_bytes.decode("cp437")
+            proc.write(probe_str + "\r")
+        except Exception as ex:
+            print(f"[!] probe write failed: {ex}")
+            try:
+                proc.write("CaptureProbe99\r")
+            except Exception:
+                pass
     r["probe_sent"] = probe_bytes.hex()
     deadline = time.time() + 20
     while time.time() < deadline:

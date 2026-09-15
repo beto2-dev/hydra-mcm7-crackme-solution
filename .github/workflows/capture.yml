@@ -2,6 +2,11 @@ name: Capture check() args
 
 on:
   workflow_dispatch:
+    inputs:
+      candidate:
+        description: 'password to send (empty = byte-repertoire probe)'
+        required: false
+        default: ''
   push:
     branches: [main]
 
@@ -31,7 +36,8 @@ jobs:
         shell: pwsh
         continue-on-error: true
         run: |
-          python tools/capture_args.py binaries/CrackMe_packed.exe evidence/args_capture.json evidence/capture
+          $cand = "${{ github.event.inputs.candidate }}"
+          python tools/capture_args.py binaries/CrackMe_packed.exe evidence/args_capture.json evidence/capture "$cand"
           Get-ChildItem evidence -Recurse | Select-Object FullName, Length | Format-Table | Out-String | Write-Host
 
       - name: Upload capture
