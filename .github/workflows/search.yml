@@ -58,7 +58,7 @@ jobs:
             (./hydra_search_avx2 ../emulator/probes "$LO" "$HI" > logs/h$i.log 2>&1; echo $? > logs/rc$i) &
             i=$((i+1))
           done < ranges.txt
-          wait
+          wait || true
           cat logs/h0.log logs/h1.log | tail -5
           for f in logs/rc0 logs/rc1; do rc=$(cat $f); if [ "$rc" -ge 2 ]; then exit $rc; fi; done
           exit 0
@@ -70,5 +70,6 @@ jobs:
           name: search-shard-${{ matrix.shard }}
           path: |
             solution/keygen/found_password.txt
-            solution/keygen/range.txt
+            solution/keygen/ranges.txt
+            solution/keygen/logs/
           if-no-files-found: ignore
