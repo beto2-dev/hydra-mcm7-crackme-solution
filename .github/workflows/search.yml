@@ -33,7 +33,7 @@ jobs:
           # prints PASS/FAIL and aborts with rc 2 on any mismatch
           ./hydra_search_avx2 ../emulator/probes 0 100 || [ $? -eq 1 ]
 
-      - name: Search shard
+      - name: Search shard (2 workers)
         run: |
           cd solution/keygen
           SHARD=${{ matrix.shard }}
@@ -50,7 +50,14 @@ jobs:
           PYEOF
           cat range.txt
           read LO HI < range.txt
-          ./hydra_search_avx2 ../emulator/probes "$LO" "$HI" || [ $? -eq 1 ]
+          MID=$(python3 -c "print(hex(($LO + $HI) // 2))")
+          mkdir -p logs
+          (./hydra_search_avx2 ../emulator/probes "$LO" "$MID" > logs/h0.log 2>&1; echo $? > logs/rc0) &
+          (./hydra_search_avx2 ../emulator/probes "$MID" "$HI" > logs/h1.log 2>&1; echo $? > logs/rc1) &
+          wait
+          cat logs/h0.log logs/h1.log | tail -5
+          for f in logs/rc0 logs/rc1; do rc=$(cat $f); if [ "$rc" -ge 2 ]; then exit $rc; fi; done
+          exit 0
 
       - name: Upload results
         if: always()

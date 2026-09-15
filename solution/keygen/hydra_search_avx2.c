@@ -189,8 +189,9 @@ int main(int argc, char **argv) {
         const char *ref[] = {"HydraKey00000000", "HydraKey00000001", "HydraKey0000000f"};
         b.n = 0;
         for (int k = 0; k < 3; k++) {
+            memset(b.pwd[k], 0, sizeof b.pwd[k]);
             memcpy(b.pwd[k], ref[k], 16);
-            b.len[k] = 16;
+            b.len[k] = 64;         /* console delivery: chars + NUL pad to 64 */
             b.n++;
         }
         ksa8(&b);
@@ -215,15 +216,20 @@ int main(int argc, char **argv) {
         for (int k = 0; k < 8 && c < end; k++, c++) {
             int n;
             if (c < 0x100000000ull) {
-                /* short form: HydraKey + 8 hex */
+                /* short form: HydraKey + 8 hex. The console reader delivers
+                 * the typed chars NUL-padded to a 64-byte string, so the
+                 * pipeline must see all 64 bytes. */
+                memset(b.pwd[k], 0, 64);
                 n = 8;
                 memcpy(b.pwd[k], "HydraKey", 8);
                 for (int i = 0; i < 8; i++)
                     b.pwd[k][n++] = "0123456789abcdef"[(c >> (4 * (7 - i))) & 0xF];
+                n = 64;
             } else {
-                /* extended form: Hk + 11 base-94 digits of the counter.
-                 * 13 chars total: length 12 must be avoided (trap length
-                 * that sabotages the 2 KiB const table). */
+                /* extended form: Hk + 11 base-94 digits of the counter
+                 * (13 typed chars, NUL-padded to the 64-byte string;
+                 * typed length 12 must be avoided - trap length). */
+                memset(b.pwd[k], 0, 64);
                 n = 2;
                 memcpy(b.pwd[k], "Hk", 2);
                 uint64_t v = c - 0x100000000ull;
@@ -231,6 +237,7 @@ int main(int argc, char **argv) {
                 for (int i = 10; i >= 0; i--) { digits[i] = v % 94; v /= 94; }
                 for (int i = 0; i < 11; i++)
                     b.pwd[k][n++] = (uint8_t)(0x21 + digits[i]);
+                n = 64;
             }
             b.len[k] = n;
             b.n++;
